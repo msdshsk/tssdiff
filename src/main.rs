@@ -14,7 +14,10 @@ use crate::config::{Config, DiffCommandType};
 use crate::git::GitExecutor;
 use crate::parser::{DiffFileKey, DiffParser, FileDiff};
 use crate::persistence::PersistenceManager;
-use crate::render::{render_diff_content, render_file_list, render_search_box, render_status_line};
+use crate::render::{
+    render_diff_content, render_file_list, render_search_box, render_status_line,
+    render_warning_bar,
+};
 use crate::theme::Theme;
 use crate::tree::{FileTreeBuilder, FileTreeItem};
 use anyhow::Result;
@@ -27,9 +30,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
-    text::Span,
-    widgets::{Block, Borders, ListState, Paragraph},
+    widgets::ListState,
 };
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
@@ -69,7 +70,7 @@ struct App {
     filtered_file_tree_items: Vec<FileTreeItem>, // Filtered items for search
     // UI state
     file_list_state: ListState, // For stateful file tree scrolling
-    warning_message: Option<String>, // Warning to display in the status bar
+    warning_message: Option<String>, // Warning to display in the warning bar below the diff pane
 }
 
 impl App {
@@ -210,6 +211,7 @@ impl App {
                 match self.execute_external_diff_tool_with_width(&self.diff_output, width) {
                     Ok(processed_output) => {
                         self.diff_output = processed_output;
+                        self.warning_message = None;
                     }
                     Err(e) => {
                         self.warning_message =
@@ -706,6 +708,7 @@ impl App {
                         match self.execute_external_diff_tool_with_width(&base_diff, Some(width)) {
                             Ok(processed_output) => {
                                 self.diff_output = processed_output;
+                                self.warning_message = None;
                             }
                             Err(e) => {
                                 self.warning_message =
@@ -748,6 +751,7 @@ impl App {
                         ) {
                             Ok(processed_output) => {
                                 self.diff_output = processed_output;
+                                self.warning_message = None;
                             }
                             Err(e) => {
                                 self.warning_message = Some(format!(
@@ -1022,7 +1026,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
         // Use poll to handle the case where stdin might not be available
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
+                if key.kind == KeyEventKind::Release {
                     continue;
                 }
                 match key.code {
@@ -1174,19 +1178,8 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_diff_content(f, right_chunks[1], app);
 
     // Render warning bar below diff content if present
-    if let Some(ref warning) = app.warning_message {
-        let warning_widget = Paragraph::new(Span::styled(
-            format!(" {warning}"),
-            Style::default().fg(app.theme.colors.status_bar_fg.0),
-        ))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Warning")
-                .style(Style::default().fg(Color::Yellow)),
-        )
-        .style(Style::default().fg(app.theme.colors.status_bar_fg.0));
-        f.render_widget(warning_widget, right_chunks[2]);
+    if app.warning_message.is_some() {
+        render_warning_bar(f, right_chunks[2], app);
     }
 }
 
@@ -1281,6 +1274,22 @@ mod tests {
         let content = buffer_to_string(buffer);
         assert!(content.contains("Diff Content"));
         assert!(content.contains("No diff content available"));
+    }
+
+    #[test]
+    fn test_render_warning_bar() {
+        let backend = TestBackend::new(100, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let config = Config::default();
+        let mut app = App::new(config, vec![], OperationMode::GitWorkingDirectory).unwrap();
+        app.warning_message = Some("Failed to process with diff tool: program not found".into());
+
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content = buffer_to_string(buffer);
+        assert!(content.contains("Warning"));
+        assert!(content.contains("Failed to process with diff tool"));
     }
 
     fn buffer_to_string(buffer: &Buffer) -> String {
