@@ -147,20 +147,29 @@ impl GitExecutor {
             .collect())
     }
 
-    /// Execute regular diff command for non-git files
+    /// Execute git diff --no-index for non-git files/directories.
+    /// Unlike plain `diff -u`, this emits `diff --git` headers that
+    /// DiffParser expects, and requires no external diff binary.
     fn execute_regular_diff(&self, file1: &str, file2: &str) -> Result<String> {
-        let output = Command::new("diff")
-            .args(["-u", file1, file2])
+        // Forward slashes keep the generated headers unquoted on Windows
+        let target1 = file1.replace('\\', "/");
+        let target2 = file2.replace('\\', "/");
+
+        let output = Command::new("git")
+            .args(["diff", "--no-index", "--", &target1, &target2])
             .output()
-            .context("Failed to execute diff")?;
+            .context("Failed to execute git diff --no-index")?;
 
-        // diff returns exit code 1 when files differ, which is normal
-        if output.status.code() == Some(2) {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Diff command failed: {}", stderr));
+        // git diff --no-index exits with 1 when the targets differ
+        match output.status.code() {
+            Some(0) | Some(1) => {
+                String::from_utf8(output.stdout).context("Git diff output is not valid UTF-8")
+            }
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(anyhow!("Git diff --no-index failed: {}", stderr))
+            }
         }
-
-        String::from_utf8(output.stdout).context("Diff output is not valid UTF-8")
     }
 
     /// Check if a string is a valid git ref
@@ -188,6 +197,47 @@ mod tests {
     fn test_git_executor_creation() {
         let _executor = GitExecutor::new();
         // Just test that we can create it without panicking
+    }
+
+    #[test]
+    fn test_execute_regular_diff_produces_git_format() {
+        let dir = std::env::temp_dir().join(format!("ftdv_diff_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file1 = dir.join("file1.txt");
+        let file2 = dir.join("file2.txt");
+        std::fs::write(&file1, "test1\n").unwrap();
+        std::fs::write(&file2, "test2\n").unwrap();
+
+        let executor = GitExecutor::new();
+        let output = executor
+            .execute_regular_diff(file1.to_str().unwrap(), file2.to_str().unwrap())
+            .unwrap();
+
+        // Output must carry git-format headers so DiffParser can split files
+        assert!(output.starts_with("diff --git"), "got: {output}");
+        let diffs = crate::parser::DiffParser::parse(&output);
+        assert_eq!(diffs.len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_execute_regular_diff_identical_files() {
+        let dir = std::env::temp_dir().join(format!("ftdv_same_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file1 = dir.join("same1.txt");
+        let file2 = dir.join("same2.txt");
+        std::fs::write(&file1, "same\n").unwrap();
+        std::fs::write(&file2, "same\n").unwrap();
+
+        let executor = GitExecutor::new();
+        let output = executor
+            .execute_regular_diff(file1.to_str().unwrap(), file2.to_str().unwrap())
+            .unwrap();
+
+        assert!(output.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
