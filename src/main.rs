@@ -69,7 +69,7 @@ struct App {
     search_query: String,                        // Current search query
     filtered_file_tree_items: Vec<FileTreeItem>, // Filtered items for search
     // UI state
-    file_list_state: ListState, // For stateful file tree scrolling
+    file_list_state: ListState,      // For stateful file tree scrolling
     warning_message: Option<String>, // Warning to display in the warning bar below the diff pane
 }
 
@@ -563,8 +563,7 @@ impl App {
                             .persistence_manager
                             .save_check_state(diff_key, is_now_checked)
                         {
-                            self.warning_message =
-                                Some(format!("Failed to save check state: {e}"));
+                            self.warning_message = Some(format!("Failed to save check state: {e}"));
                         }
                     }
                 }
@@ -754,9 +753,8 @@ impl App {
                                 self.warning_message = None;
                             }
                             Err(e) => {
-                                self.warning_message = Some(format!(
-                                    "Failed to refresh diff with area width: {e}"
-                                ));
+                                self.warning_message =
+                                    Some(format!("Failed to refresh diff with area width: {e}"));
                             }
                         }
                     }
@@ -1057,10 +1055,8 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                     }
 
                     // Backspace in search input mode
-                    KeyCode::Backspace => {
-                        if app.search_input_mode {
-                            app.remove_search_char();
-                        }
+                    KeyCode::Backspace if app.search_input_mode => {
+                        app.remove_search_char();
                     }
 
                     // File navigation (disabled only when actively typing in search)

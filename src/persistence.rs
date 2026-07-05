@@ -142,7 +142,9 @@ mod tests {
         manager.save_check_state(&key, true).unwrap();
 
         // Load and verify
-        let checked = manager.load_checked_files(&[key.clone()]).unwrap();
+        let checked = manager
+            .load_checked_files(std::slice::from_ref(&key))
+            .unwrap();
         assert!(checked.contains("src/main.rs"));
 
         // Save unchecked state
