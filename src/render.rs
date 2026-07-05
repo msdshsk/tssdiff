@@ -1,13 +1,193 @@
-use crate::App;
 use crate::side_by_side::{AlignedRow, RowKind};
+use crate::{App, LeftPane, MenuAction};
 use ansi_to_tui::IntoText;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+
+pub fn render_menu_bar(f: &mut Frame, area: Rect, app: &mut App) {
+    app.regions.menu_items.clear();
+
+    let entries: [(&str, &str, MenuAction); 5] = [
+        ("1", "Files", MenuAction::Files),
+        ("2", "History", MenuAction::History),
+        ("v", "View", MenuAction::ToggleView),
+        ("?", "Help", MenuAction::Help),
+        ("q", "Quit", MenuAction::Quit),
+    ];
+
+    let brand = " tssdiff  ";
+    let mut spans = vec![Span::styled(
+        brand,
+        Style::default()
+            .fg(app.theme.colors.title.0)
+            .add_modifier(Modifier::BOLD),
+    )];
+    let mut x = area.x + brand.len() as u16;
+
+    for (key, label, action) in entries {
+        let active = matches!(
+            (action, app.left_pane),
+            (MenuAction::Files, LeftPane::Files) | (MenuAction::History, LeftPane::History)
+        );
+        let label_style = if active {
+            Style::default()
+                .fg(app.theme.colors.tree_selected_fg.0)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.colors.text_primary.0)
+        };
+
+        let text = format!("[{key}] {label}");
+        let width = text.len() as u16;
+        spans.push(Span::styled(
+            format!("[{key}]"),
+            Style::default().fg(app.theme.colors.status_modified.0),
+        ));
+        spans.push(Span::styled(format!(" {label}"), label_style));
+        spans.push(Span::raw("  "));
+
+        app.regions.menu_items.push((
+            Rect {
+                x,
+                y: area.y,
+                width,
+                height: 1,
+            },
+            action,
+        ));
+        x += width + 2;
+    }
+
+    let bar = Paragraph::new(Line::from(spans))
+        .style(Style::default().bg(app.theme.colors.status_bar_bg.0));
+    f.render_widget(bar, area);
+}
+
+pub fn render_commit_list(f: &mut Frame, area: Rect, app: &mut App) {
+    let mut items: Vec<ListItem> = Vec::with_capacity(app.commits.len() + 1);
+
+    let selected_bg = Style::default().bg(app.theme.colors.tree_selected_bg.0);
+
+    // Virtual entry for the current working tree
+    let working_tree_line = Line::from(Span::styled(
+        "● Working tree",
+        Style::default().fg(app.theme.colors.status_added.0),
+    ));
+    items.push(
+        ListItem::new(working_tree_line).style(if app.commit_index == 0 {
+            selected_bg
+        } else {
+            Style::default()
+        }),
+    );
+
+    for (i, commit) in app.commits.iter().enumerate() {
+        let is_selected = app.commit_index == i + 1;
+        let line = Line::from(vec![
+            Span::styled(
+                format!("{} ", commit.hash),
+                Style::default().fg(app.theme.colors.status_modified.0),
+            ),
+            Span::styled(
+                commit.subject.clone(),
+                if is_selected {
+                    Style::default().fg(app.theme.colors.tree_selected_fg.0)
+                } else {
+                    Style::default().fg(app.theme.colors.text_primary.0)
+                },
+            ),
+        ]);
+        items.push(ListItem::new(line).style(if is_selected {
+            selected_bg
+        } else {
+            Style::default()
+        }));
+    }
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" History ({} commits)", app.commits.len()))
+                .style(Style::default().fg(app.theme.colors.border_focused.0)),
+        )
+        .style(Style::default().fg(app.theme.colors.text_primary.0));
+
+    f.render_stateful_widget(list, area, &mut app.commit_list_state);
+}
+
+pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
+    let width = 60.min(area.width.saturating_sub(2));
+    let height = 26.min(area.height.saturating_sub(2));
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+
+    let section = |title: &str| {
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(app.theme.colors.title.0)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let entry = |key: &str, description: &str| {
+        Line::from(vec![
+            Span::styled(
+                format!("  {key:<16}"),
+                Style::default().fg(app.theme.colors.status_modified.0),
+            ),
+            Span::styled(
+                description.to_string(),
+                Style::default().fg(app.theme.colors.text_primary.0),
+            ),
+        ])
+    };
+
+    let lines = vec![
+        section(" Navigation"),
+        entry("j/k, Up/Down", "select file / commit"),
+        entry("g / G", "first / last entry"),
+        entry("Enter", "open commit / toggle directory"),
+        entry("Esc", "back (Files <-> History), close help"),
+        entry("1 / 2", "Files pane / History pane"),
+        Line::default(),
+        section(" View"),
+        entry("v", "side-by-side <-> unified diff"),
+        entry("e/y, d/u, f/b", "scroll diff 1 / 10 / 20 lines"),
+        entry("PgDn / PgUp", "scroll diff 10 lines"),
+        entry("h/l, H/L", "scroll horizontally 5 / 20 cols"),
+        Line::default(),
+        section(" Files"),
+        entry("/", "filter file list"),
+        entry("Tab", "mark file as reviewed"),
+        entry("Space", "refresh diff view"),
+        Line::default(),
+        section(" Mouse"),
+        entry("click", "select entry / menu, click again: open"),
+        entry("wheel", "scroll list or diff"),
+        Line::default(),
+        entry("q", "quit"),
+        entry("?", "toggle this help"),
+    ];
+
+    f.render_widget(Clear, popup);
+    let help = Paragraph::new(Text::from(lines)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Help ")
+            .style(Style::default().fg(app.theme.colors.border_focused.0)),
+    );
+    f.render_widget(help, popup);
+}
 
 pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
     let available_width = area.width.saturating_sub(4) as usize; // Account for borders and padding
@@ -292,7 +472,28 @@ fn should_refresh_diff_width(_app: &App, current_width: u16) -> bool {
 
 pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
     let current_items = app.get_current_file_tree_items();
-    let status_spans = if let Some(tree_item) = current_items.get(app.selected_index) {
+    let status_spans = if app.left_pane == LeftPane::History {
+        if app.commit_index == 0 {
+            vec![Span::styled(
+                " ● Working tree changes | Enter: open".to_string(),
+                Style::default().fg(app.theme.colors.status_added.0),
+            )]
+        } else if let Some(commit) = app.commits.get(app.commit_index - 1) {
+            vec![
+                Span::styled(
+                    format!(" {} ", commit.hash),
+                    Style::default().fg(app.theme.colors.status_modified.0),
+                ),
+                Span::styled(
+                    format!("{} ", commit.date),
+                    Style::default().fg(app.theme.colors.text_secondary.0),
+                ),
+                Span::raw(commit.subject.clone()),
+            ]
+        } else {
+            vec![Span::raw(" No commit selected")]
+        }
+    } else if let Some(tree_item) = current_items.get(app.selected_index) {
         let mut spans = Vec::new();
 
         if tree_item.is_directory {

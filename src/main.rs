@@ -12,12 +12,13 @@ mod tree;
 
 use crate::cli::{Cli, OperationMode};
 use crate::config::{Config, DiffCommandType};
-use crate::git::GitExecutor;
+use crate::git::{CommitInfo, GitExecutor};
 use crate::parser::{DiffFileKey, DiffParser, FileDiff};
 use crate::persistence::PersistenceManager;
 use crate::render::{
-    render_diff_content, render_file_list, render_search_box, render_side_by_side,
-    render_status_line, render_warning_bar,
+    render_commit_list, render_diff_content, render_file_list, render_help_overlay,
+    render_menu_bar, render_search_box, render_side_by_side, render_status_line,
+    render_warning_bar,
 };
 use crate::side_by_side::AlignedRow;
 use crate::theme::Theme;
@@ -25,7 +26,8 @@ use crate::tree::{FileTreeBuilder, FileTreeItem};
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+        MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -33,7 +35,7 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     widgets::ListState,
 };
 use std::io::{self, Read};
@@ -50,6 +52,31 @@ enum ViewMode {
     SideBySide,
     /// Raw unified diff, optionally piped through an external tool
     Unified,
+}
+
+/// What the left pane currently lists
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeftPane {
+    Files,
+    History,
+}
+
+/// Clickable menu bar entries
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    Files,
+    History,
+    ToggleView,
+    Help,
+    Quit,
+}
+
+/// Screen regions captured during rendering, used for mouse hit-testing
+#[derive(Default, Clone)]
+struct UiRegions {
+    menu_items: Vec<(Rect, MenuAction)>,
+    left_column: Rect,
+    list_area: Rect,
 }
 
 // Template variable values for command substitution
@@ -86,6 +113,13 @@ struct App {
     warning_message: Option<String>, // Warning to display in the warning bar below the diff pane
     view_mode: ViewMode,
     aligned_rows: Option<Vec<AlignedRow>>, // Before/after rows for the current file
+    // Commit history browsing
+    left_pane: LeftPane,
+    commits: Vec<CommitInfo>,     // Loaded lazily when History opens
+    commit_index: usize,          // 0 = virtual working-tree entry, 1.. = commits
+    commit_list_state: ListState, // For stateful commit list scrolling
+    show_help: bool,              // Help overlay visibility
+    regions: UiRegions,           // Mouse hit-test regions from the last frame
 }
 
 impl App {
@@ -158,9 +192,134 @@ impl App {
             warning_message: None,
             view_mode: ViewMode::SideBySide,
             aligned_rows: None,
+            left_pane: LeftPane::Files,
+            commits: Vec::new(),
+            commit_index: 0,
+            commit_list_state: {
+                let mut state = ListState::default();
+                state.select(Some(0));
+                state
+            },
+            show_help: false,
+            regions: UiRegions::default(),
         };
         app.refresh_aligned_rows();
         Ok(app)
+    }
+
+    /// Total entries in the history list (virtual working-tree entry + commits)
+    fn history_len(&self) -> usize {
+        1 + self.commits.len()
+    }
+
+    /// Switch the left pane to the commit history, loading it on first use
+    fn open_history(&mut self) {
+        if !GitExecutor::is_git_repo() {
+            self.warning_message = Some("History requires a git repository".to_string());
+            return;
+        }
+        if self.search_mode {
+            self.exit_search_mode();
+        }
+        if self.commits.is_empty() {
+            match GitExecutor::new().get_commit_log(300) {
+                Ok(commits) => self.commits = commits,
+                Err(e) => {
+                    self.warning_message = Some(format!("Failed to load history: {e}"));
+                }
+            }
+        }
+        self.left_pane = LeftPane::History;
+        self.preview_history_entry();
+    }
+
+    fn show_files_pane(&mut self) {
+        self.left_pane = LeftPane::Files;
+        self.update_diff_content();
+    }
+
+    /// Move the history selection and preview the entry in the diff pane
+    fn history_move(&mut self, delta: isize) {
+        let len = self.history_len();
+        let new_index = self
+            .commit_index
+            .saturating_add_signed(delta)
+            .min(len.saturating_sub(1));
+        self.history_select(new_index);
+    }
+
+    fn history_select(&mut self, index: usize) {
+        self.commit_index = index.min(self.history_len().saturating_sub(1));
+        self.commit_list_state.select(Some(self.commit_index));
+        self.preview_history_entry();
+    }
+
+    /// Show commit metadata + diffstat (or working-tree status) on the right
+    fn preview_history_entry(&mut self) {
+        let executor = GitExecutor::new();
+        let preview = if self.commit_index == 0 {
+            executor
+                .get_status_summary()
+                .map(|status| format!("● Working tree changes\n\n{status}\nEnter/click: open"))
+        } else {
+            match self.commits.get(self.commit_index - 1) {
+                Some(commit) => executor
+                    .get_commit_summary(&commit.hash)
+                    .map(|summary| format!("{summary}\nEnter/click: open this commit")),
+                None => return,
+            }
+        };
+
+        match preview {
+            Ok(text) => self.diff_output = text,
+            Err(e) => self.diff_output = format!("Failed to load preview: {e}"),
+        }
+        self.aligned_rows = None;
+        self.vertical_scroll = 0;
+        self.horizontal_scroll = 0;
+    }
+
+    /// Load the selected history entry's changes into the Files pane
+    fn open_selected_history_entry(&mut self) {
+        let mode = if self.commit_index == 0 {
+            OperationMode::GitWorkingDirectory
+        } else {
+            match self.commits.get(self.commit_index - 1) {
+                Some(commit) => OperationMode::GitCommit {
+                    commit: commit.hash.clone(),
+                },
+                None => return,
+            }
+        };
+
+        match get_diffs_from_git(&mode) {
+            Ok(diffs) if diffs.is_empty() => {
+                self.warning_message = Some("No changes in this entry".to_string());
+            }
+            Ok(diffs) => {
+                let diff_keys: Vec<DiffFileKey> =
+                    diffs.iter().filter_map(|fd| fd.diff_key.clone()).collect();
+                self.checked_files = self
+                    .persistence_manager
+                    .load_checked_files(&diff_keys)
+                    .unwrap_or_default();
+
+                self.operation_mode = mode;
+                self.git_executor = Some(GitExecutor::new());
+                self.original_file_diffs = diffs;
+                self.collapsed_directories.clear();
+                self.rebuild_file_tree();
+                self.filtered_file_tree_items = self.file_tree_items.clone();
+                self.selected_index = 0;
+                self.file_list_state.select(Some(0));
+                self.left_pane = LeftPane::Files;
+                self.warning_message = None;
+                self.update_diff_content();
+            }
+            Err(e) => {
+                self.warning_message = Some(format!("Failed to load changes: {e}"));
+            }
+        }
     }
 
     fn toggle_view_mode(&mut self) {
@@ -193,6 +352,127 @@ impl App {
             executor.get_file_versions(&self.operation_mode, &file_diff)
         {
             self.aligned_rows = Some(side_by_side::align(&old_text, &new_text));
+        }
+    }
+
+    /// Route navigation keys to whichever list the left pane shows
+    fn nav_next(&mut self) {
+        match self.left_pane {
+            LeftPane::Files => self.select_next(),
+            LeftPane::History => self.history_move(1),
+        }
+    }
+
+    fn nav_previous(&mut self) {
+        match self.left_pane {
+            LeftPane::Files => self.select_previous(),
+            LeftPane::History => self.history_move(-1),
+        }
+    }
+
+    fn nav_first(&mut self) {
+        match self.left_pane {
+            LeftPane::Files => self.jump_to_top(),
+            LeftPane::History => self.history_select(0),
+        }
+    }
+
+    fn nav_last(&mut self) {
+        match self.left_pane {
+            LeftPane::Files => self.jump_to_bottom(),
+            LeftPane::History => self.history_select(self.history_len().saturating_sub(1)),
+        }
+    }
+
+    fn handle_menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::Files => self.show_files_pane(),
+            MenuAction::History => self.open_history(),
+            MenuAction::ToggleView => self.toggle_view_mode(),
+            MenuAction::Help => self.show_help = !self.show_help,
+            MenuAction::Quit => self.should_quit = true,
+        }
+    }
+
+    fn handle_mouse_click(&mut self, mouse: MouseEvent) {
+        let position = Position {
+            x: mouse.column,
+            y: mouse.row,
+        };
+
+        if self.show_help {
+            self.show_help = false;
+            return;
+        }
+
+        let menu_action = self
+            .regions
+            .menu_items
+            .iter()
+            .find(|(rect, _)| rect.contains(position))
+            .map(|(_, action)| *action);
+        if let Some(action) = menu_action {
+            self.handle_menu_action(action);
+            return;
+        }
+
+        if self.regions.list_area.contains(position) {
+            self.handle_list_click(mouse.row);
+        }
+    }
+
+    fn handle_list_click(&mut self, row: u16) {
+        let area = self.regions.list_area;
+        // Only rows inside the borders map to list entries
+        if row <= area.y || row >= area.y + area.height.saturating_sub(1) {
+            return;
+        }
+        let visual_row = (row - area.y - 1) as usize;
+
+        match self.left_pane {
+            LeftPane::History => {
+                let index = self.commit_list_state.offset() + visual_row;
+                if index >= self.history_len() {
+                    return;
+                }
+                if index == self.commit_index {
+                    // Second click on the selected entry opens it
+                    self.open_selected_history_entry();
+                } else {
+                    self.history_select(index);
+                }
+            }
+            LeftPane::Files => {
+                let index = self.file_list_state.offset() + visual_row;
+                let Some(item) = self.get_current_file_tree_items().get(index).cloned() else {
+                    return;
+                };
+                self.selected_index = index;
+                self.file_list_state.select(Some(index));
+                if item.is_directory {
+                    self.toggle_directory();
+                } else {
+                    self.update_diff_content();
+                }
+            }
+        }
+    }
+
+    fn handle_mouse_scroll(&mut self, mouse: MouseEvent, scroll_down: bool) {
+        let position = Position {
+            x: mouse.column,
+            y: mouse.row,
+        };
+        if self.regions.left_column.contains(position) {
+            if scroll_down {
+                self.nav_next();
+            } else {
+                self.nav_previous();
+            }
+        } else if scroll_down {
+            self.scroll_down(3);
+        } else {
+            self.scroll_up(3);
         }
     }
 
@@ -1108,15 +1388,24 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                             }
                         }
                         KeyCode::Esc => {
-                            if app.search_mode {
+                            if app.show_help {
+                                app.show_help = false;
+                            } else if app.search_mode {
                                 app.exit_search_mode();
+                            } else if app.left_pane == LeftPane::History {
+                                app.show_files_pane();
+                            } else if GitExecutor::is_git_repo() {
+                                // Esc from Files steps back into the history list
+                                app.open_history();
                             } else {
                                 app.should_quit = true;
                             }
                         }
 
-                        // Search mode (use '/' key)
-                        KeyCode::Char('/') if !app.search_input_mode => {
+                        // Search mode (use '/' key, file list only)
+                        KeyCode::Char('/')
+                            if !app.search_input_mode && app.left_pane == LeftPane::Files =>
+                        {
                             app.enter_search_mode();
                         }
 
@@ -1130,12 +1419,12 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                             app.remove_search_char();
                         }
 
-                        // File navigation (disabled only when actively typing in search)
+                        // List navigation (disabled only when actively typing in search)
                         KeyCode::Down | KeyCode::Char('j') if !app.search_input_mode => {
-                            app.select_next()
+                            app.nav_next()
                         }
                         KeyCode::Up | KeyCode::Char('k') if !app.search_input_mode => {
-                            app.select_previous()
+                            app.nav_previous()
                         }
 
                         // Handle character input in search input mode (must be after other char handlers)
@@ -1143,8 +1432,12 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                             app.add_search_char(c);
                         }
                         KeyCode::Enter => {
-                            // Toggle directory expansion/collapse or update diff view
-                            if let Some(tree_item) = app.file_tree_items.get(app.selected_index) {
+                            if app.left_pane == LeftPane::History {
+                                app.open_selected_history_entry();
+                            } else if let Some(tree_item) =
+                                app.file_tree_items.get(app.selected_index)
+                            {
+                                // Toggle directory expansion/collapse or update diff view
                                 if tree_item.is_directory {
                                     app.toggle_directory();
                                 } else {
@@ -1153,12 +1446,21 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                             }
                         }
 
+                        // Left pane switching
+                        KeyCode::Char('1') if !app.search_input_mode => app.show_files_pane(),
+                        KeyCode::Char('2') if !app.search_input_mode => app.open_history(),
+
+                        // Help overlay
+                        KeyCode::Char('?') if !app.search_input_mode => {
+                            app.show_help = !app.show_help
+                        }
+
                         // Toggle between side-by-side and unified diff view
                         KeyCode::Char('v') if !app.search_input_mode => app.toggle_view_mode(),
 
                         // Jump navigation (disabled only when typing in search)
-                        KeyCode::Char('g') if !app.search_input_mode => app.jump_to_top(),
-                        KeyCode::Char('G') if !app.search_input_mode => app.jump_to_bottom(),
+                        KeyCode::Char('g') if !app.search_input_mode => app.nav_first(),
+                        KeyCode::Char('G') if !app.search_input_mode => app.nav_last(),
 
                         // Vertical scrolling (disabled only when typing in search)
                         KeyCode::Char('e') | KeyCode::Char('J') if !app.search_input_mode => {
@@ -1187,31 +1489,25 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                         KeyCode::Char('L') if !app.search_input_mode => app.scroll_right(20),
 
                         // Space key (disabled only when typing in search)
-                        KeyCode::Char(' ') if !app.search_input_mode => {
+                        KeyCode::Char(' ')
+                            if !app.search_input_mode && app.left_pane == LeftPane::Files =>
+                        {
                             // File is already selected, just update view
                             app.update_diff_content();
                         }
 
-                        // Checkbox toggle (works in both modes)
-                        KeyCode::Tab => app.toggle_file_checked(),
+                        // Checkbox toggle (file list only)
+                        KeyCode::Tab if app.left_pane == LeftPane::Files => {
+                            app.toggle_file_checked()
+                        }
 
                         _ => {}
                     }
                 }
                 Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
-                        let width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(0);
-                        // Wheel over the file list moves the selection; over
-                        // the diff area it scrolls the content (layout is 20/80)
-                        let over_file_list = mouse.column < width / 5;
-                        let scroll_down = mouse.kind == MouseEventKind::ScrollDown;
-                        match (over_file_list, scroll_down) {
-                            (true, true) => app.select_next(),
-                            (true, false) => app.select_previous(),
-                            (false, true) => app.scroll_down(3),
-                            (false, false) => app.scroll_up(3),
-                        }
-                    }
+                    MouseEventKind::ScrollDown => app.handle_mouse_scroll(mouse, true),
+                    MouseEventKind::ScrollUp => app.handle_mouse_scroll(mouse, false),
+                    MouseEventKind::Down(MouseButton::Left) => app.handle_mouse_click(mouse),
                     _ => {}
                 },
                 _ => {}
@@ -1227,22 +1523,37 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
 fn ui(f: &mut Frame, app: &mut App) {
     let has_warning = app.warning_message.is_some();
 
-    // Main horizontal split: file list (20%) and diff content area (80%)
+    // Menu bar on top, content below
+    let frame_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(f.area());
+
+    render_menu_bar(f, frame_chunks[0], app);
+
+    // Main horizontal split: left list (20%) and diff content area (80%)
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
-        .split(f.area());
+        .split(frame_chunks[1]);
 
-    // Render search box and file list based on search mode
-    if app.search_mode {
+    app.regions.left_column = main_chunks[0];
+
+    // Left pane: commit history, or file list with optional search box
+    if app.left_pane == LeftPane::History {
+        app.regions.list_area = main_chunks[0];
+        render_commit_list(f, main_chunks[0], app);
+    } else if app.search_mode {
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(main_chunks[0]);
 
         render_search_box(f, left_chunks[0], app);
+        app.regions.list_area = left_chunks[1];
         render_file_list(f, left_chunks[1], app);
     } else {
+        app.regions.list_area = main_chunks[0];
         render_file_list(f, main_chunks[0], app);
     }
 
@@ -1275,6 +1586,10 @@ fn ui(f: &mut Frame, app: &mut App) {
     // already computed without the bar - it will show on the next draw.
     if has_warning {
         render_warning_bar(f, right_chunks[2], app);
+    }
+
+    if app.show_help {
+        render_help_overlay(f, f.area(), app);
     }
 }
 
@@ -1420,6 +1735,74 @@ mod tests {
         assert!(content.contains("old line"));
         assert!(content.contains("new line"));
         assert!(content.contains("same"));
+    }
+
+    #[test]
+    fn test_render_menu_bar_and_click() {
+        use crossterm::event::KeyModifiers;
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let config = Config::default();
+        let mut app = App::new(config, vec![], OperationMode::GitWorkingDirectory).unwrap();
+
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(content.contains("tssdiff"));
+        assert!(content.contains("Files"));
+        assert!(content.contains("History"));
+        assert!(content.contains("Help"));
+        assert_eq!(app.regions.menu_items.len(), 5);
+
+        // Clicking the Help menu entry opens the help overlay
+        let (rect, _) = *app
+            .regions
+            .menu_items
+            .iter()
+            .find(|(_, action)| *action == MenuAction::Help)
+            .unwrap();
+        app.handle_mouse_click(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(app.show_help);
+
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(content.contains("Navigation"));
+        assert!(content.contains("side-by-side"));
+    }
+
+    #[test]
+    fn test_render_history_pane() {
+        // Wide enough that the 20% left pane fits the full title and subject
+        let backend = TestBackend::new(220, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let config = Config::default();
+        let mut app = App::new(config, vec![], OperationMode::GitWorkingDirectory).unwrap();
+        app.commits = vec![CommitInfo {
+            hash: "abc1234".to_string(),
+            date: "2026-07-06 10:00".to_string(),
+            subject: "test commit subject".to_string(),
+        }];
+        app.left_pane = LeftPane::History;
+        app.commit_index = 1;
+        app.commit_list_state.select(Some(1));
+        app.diff_output = "commit preview".to_string();
+        app.aligned_rows = None;
+
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(content.contains("History (1 commits)"));
+        assert!(content.contains("Working tree"));
+        assert!(content.contains("abc1234"));
+        assert!(content.contains("test commit subject"));
+        // Status line shows the selected commit's date
+        assert!(content.contains("2026-07-06 10:00"));
     }
 
     #[test]

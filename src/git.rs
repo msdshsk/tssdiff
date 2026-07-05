@@ -7,6 +7,14 @@ use std::process::Command;
 /// Hash of git's well-known empty tree, used as the diff base for root commits
 const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+/// One entry of the commit history list
+#[derive(Debug, Clone)]
+pub struct CommitInfo {
+    pub hash: String,
+    pub date: String,
+    pub subject: String,
+}
+
 /// Git command executor for getting diff data
 pub struct GitExecutor;
 
@@ -310,6 +318,78 @@ impl GitExecutor {
         }
     }
 
+    /// Recent commit history, newest first
+    pub fn get_commit_log(&self, limit: usize) -> Result<Vec<CommitInfo>> {
+        Self::get_commit_log_in(Path::new("."), limit)
+    }
+
+    fn get_commit_log_in(dir: &Path, limit: usize) -> Result<Vec<CommitInfo>> {
+        let output = Command::new("git")
+            .args([
+                "log",
+                &format!("-n{limit}"),
+                "--date=format:%Y-%m-%d %H:%M",
+                "--pretty=format:%h%x09%ad%x09%s",
+            ])
+            .current_dir(dir)
+            .output()
+            .context("Failed to execute git log")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("git log failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8(output.stdout).context("Git output is not valid UTF-8")?;
+        Ok(stdout
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(3, '\t');
+                Some(CommitInfo {
+                    hash: parts.next()?.to_string(),
+                    date: parts.next()?.to_string(),
+                    subject: parts.next().unwrap_or("").to_string(),
+                })
+            })
+            .collect())
+    }
+
+    /// Commit header, message, and diffstat (no patch) for previews
+    pub fn get_commit_summary(&self, commit: &str) -> Result<String> {
+        let output = Command::new("git")
+            .args([
+                "show",
+                "--stat",
+                "--color=never",
+                "--date=format:%Y-%m-%d %H:%M",
+                commit,
+            ])
+            .output()
+            .context("Failed to execute git show")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("git show failed: {}", stderr));
+        }
+
+        String::from_utf8(output.stdout).context("Git output is not valid UTF-8")
+    }
+
+    /// Short working-tree status for the history preview
+    pub fn get_status_summary(&self) -> Result<String> {
+        let output = Command::new("git")
+            .args(["status", "--short", "--branch"])
+            .output()
+            .context("Failed to execute git status")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("git status failed: {}", stderr));
+        }
+
+        String::from_utf8(output.stdout).context("Git output is not valid UTF-8")
+    }
+
     /// Diff base for reviewing a single commit: its first parent, or the
     /// empty tree for a root commit
     fn commit_diff_base(&self, commit: &str) -> String {
@@ -489,6 +569,36 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].filename, "sub/new.txt");
         assert_eq!(parsed[0].added_lines, 1);
+    }
+
+    #[test]
+    fn test_get_commit_log_in_parses_entries() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@t"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "first commit"]);
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        run(&["commit", "-aqm", "second commit"]);
+
+        let log = GitExecutor::get_commit_log_in(repo, 10).unwrap();
+        assert_eq!(log.len(), 2);
+        // Newest first
+        assert_eq!(log[0].subject, "second commit");
+        assert_eq!(log[1].subject, "first commit");
+        assert!(!log[0].hash.is_empty());
+        assert!(log[0].date.contains('-'), "got date: {}", log[0].date);
     }
 
     #[test]
