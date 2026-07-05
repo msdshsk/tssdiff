@@ -3,6 +3,9 @@ use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Hash of git's well-known empty tree, used as the diff base for root commits
+const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// Git command executor for getting diff data
 pub struct GitExecutor;
 
@@ -30,6 +33,10 @@ impl GitExecutor {
             }
             OperationMode::GitCached => self.execute_git_diff(&["diff", "--cached"]),
             OperationMode::GitDiff { target } => self.execute_git_diff(&["diff", target]),
+            OperationMode::GitCommit { commit } => {
+                let base = self.commit_diff_base(commit);
+                self.execute_git_diff(&["diff", &base, commit])
+            }
             OperationMode::Compare { target1, target2 } => {
                 // Check if both targets are git refs
                 if self.is_git_ref(target1)? && self.is_git_ref(target2)? {
@@ -60,6 +67,10 @@ impl GitExecutor {
                 self.execute_git_name_only(&["diff", "--name-only", target])
             }
             OperationMode::GitStatus => self.execute_git_name_only(&["diff", "--name-only"]),
+            OperationMode::GitCommit { commit } => {
+                let base = self.commit_diff_base(commit);
+                self.execute_git_name_only(&["diff", "--name-only", &base, commit])
+            }
             OperationMode::Compare { target1, target2 } => {
                 if self.is_git_ref(target1)? && self.is_git_ref(target2)? {
                     self.execute_git_name_only(&[
@@ -96,6 +107,10 @@ impl GitExecutor {
             }
             OperationMode::GitDiff { target } => {
                 self.execute_git_diff(&["diff", target, "--", file_path])
+            }
+            OperationMode::GitCommit { commit } => {
+                let base = self.commit_diff_base(commit);
+                self.execute_git_diff(&["diff", &base, commit, "--", file_path])
             }
             OperationMode::Compare { target1, target2 } => {
                 if self.is_git_ref(target1)? && self.is_git_ref(target2)? {
@@ -186,6 +201,23 @@ impl GitExecutor {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 Err(anyhow!("Git diff --no-index failed: {}", stderr))
             }
+        }
+    }
+
+    /// Diff base for reviewing a single commit: its first parent, or the
+    /// empty tree for a root commit
+    fn commit_diff_base(&self, commit: &str) -> String {
+        let parent = format!("{commit}^");
+        let has_parent = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", &parent])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+
+        if has_parent {
+            parent
+        } else {
+            EMPTY_TREE_HASH.to_string()
         }
     }
 

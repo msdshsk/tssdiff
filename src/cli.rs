@@ -47,6 +47,11 @@ pub enum Commands {
     },
     /// Show current git status with diffs
     Status,
+    /// Show changes introduced by a specific commit (like git show)
+    Show {
+        /// Commit to review (e.g. HEAD, a1b2c3d, v1.0.0)
+        commit: String,
+    },
     /// Generate shell completions
     Completions {
         #[arg(value_enum)]
@@ -84,6 +89,9 @@ impl Cli {
                     }
                 }
                 Commands::Status => OperationMode::GitStatus,
+                Commands::Show { commit } => OperationMode::GitCommit {
+                    commit: commit.clone(),
+                },
                 Commands::Completions { shell } => OperationMode::Completions { shell: *shell },
             }
         } else if self.cached {
@@ -121,6 +129,8 @@ pub enum OperationMode {
     GitDiff { target: String },
     /// Show git status with diffs
     GitStatus,
+    /// Show changes introduced by a single commit
+    GitCommit { commit: String },
     /// Compare two targets (refs, files, or directories)
     Compare { target1: String, target2: String },
     /// Generate shell completions
@@ -136,7 +146,8 @@ impl OperationMode {
             OperationMode::GitWorkingDirectory
             | OperationMode::GitCached
             | OperationMode::GitDiff { .. }
-            | OperationMode::GitStatus => true,
+            | OperationMode::GitStatus
+            | OperationMode::GitCommit { .. } => true,
             OperationMode::Compare { .. }
             | OperationMode::Completions { .. }
             | OperationMode::Invalid { .. } => false,
@@ -151,6 +162,7 @@ impl OperationMode {
             OperationMode::GitCached => "Staged changes".to_string(),
             OperationMode::GitDiff { target } => format!("Changes from {target}"),
             OperationMode::GitStatus => "Git status with diffs".to_string(),
+            OperationMode::GitCommit { commit } => format!("Changes introduced by {commit}"),
             OperationMode::Compare { target1, target2 } => {
                 format!("Comparing {target1} with {target2}")
             }
@@ -215,6 +227,26 @@ mod tests {
         match cli.get_operation_mode() {
             OperationMode::GitDiff { target } => assert_eq!(target, "branch1"),
             _ => panic!("Expected GitDiff mode"),
+        }
+    }
+
+    #[test]
+    fn test_show_subcommand() {
+        let cli = Cli {
+            command: Some(Commands::Show {
+                commit: "HEAD".to_string(),
+            }),
+            targets: vec![],
+            cached: false,
+            worktree: false,
+            flat: false,
+            config: None,
+            verbose: false,
+        };
+
+        match cli.get_operation_mode() {
+            OperationMode::GitCommit { commit } => assert_eq!(commit, "HEAD"),
+            _ => panic!("Expected GitCommit mode"),
         }
     }
 
