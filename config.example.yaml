@@ -1,6 +1,14 @@
 # ftdv Configuration Example
 # Save this as ~/.config/ftdv/config.yaml
 
+# Show changed files as a flat full-path list instead of a tree
+# (same as the --flat / -f command line flag)
+flat_file_list: false
+
+# The diff pane defaults to built-in side-by-side before/after panes
+# (no external tools needed). Press 'v' in the app to switch to the
+# unified view, where the external tools configured below apply.
+
 # Git paging configuration (inspired by lazygit)
 git:
   paging:

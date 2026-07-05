@@ -1,9 +1,10 @@
 use crate::App;
+use crate::side_by_side::{AlignedRow, RowKind};
 use ansi_to_tui::IntoText;
 use ratatui::{
     Frame,
-    layout::Rect,
-    style::Style,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
@@ -403,6 +404,101 @@ pub fn render_search_box(f: &mut Frame, area: Rect, app: &App) {
         .style(search_style);
 
     f.render_widget(search_box, area);
+}
+
+pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
+    let Some(rows) = app.aligned_rows.take() else {
+        return;
+    };
+
+    // Clamp scrolling to the aligned content
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let max_vertical = rows.len().saturating_sub(visible_height) as u16;
+    app.vertical_scroll = app.vertical_scroll.min(max_vertical);
+
+    let start = app.vertical_scroll as usize;
+    let end = (start + visible_height).min(rows.len());
+    let visible = &rows[start..end];
+
+    // Line number gutter sized for the largest visible line number
+    let max_line_number = rows
+        .iter()
+        .flat_map(|row| [row.old.as_ref(), row.new.as_ref()])
+        .flatten()
+        .map(|(number, _)| *number)
+        .max()
+        .unwrap_or(1);
+    let gutter_width = max_line_number.to_string().len().max(3);
+
+    let old_lines: Vec<Line> = visible
+        .iter()
+        .map(|row| side_line(row, true, gutter_width, app))
+        .collect();
+    let new_lines: Vec<Line> = visible
+        .iter()
+        .map(|row| side_line(row, false, gutter_width, app))
+        .collect();
+
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let border_style = Style::default().fg(app.theme.colors.border.0);
+    let before = Paragraph::new(Text::from(old_lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Before")
+                .style(border_style),
+        )
+        .scroll((0, app.horizontal_scroll));
+    let after = Paragraph::new(Text::from(new_lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" After - [v: unified view]")
+                .style(border_style),
+        )
+        .scroll((0, app.horizontal_scroll));
+
+    f.render_widget(before, panes[0]);
+    f.render_widget(after, panes[1]);
+
+    app.aligned_rows = Some(rows);
+}
+
+/// One display line for the old (before) or new (after) pane
+fn side_line(row: &AlignedRow, old_side: bool, gutter_width: usize, app: &App) -> Line<'static> {
+    let side = if old_side { &row.old } else { &row.new };
+
+    let Some((number, text)) = side else {
+        // Line only exists on the other side: keep the row for alignment
+        return Line::from(Span::styled(
+            format!("{:>gutter_width$} ", "·"),
+            Style::default()
+                .fg(app.theme.colors.text_dim.0)
+                .add_modifier(Modifier::DIM),
+        ));
+    };
+
+    let (marker, text_style) = match row.kind {
+        RowKind::Context => (' ', Style::default().fg(app.theme.colors.text_primary.0)),
+        RowKind::Removed => ('-', Style::default().fg(app.theme.colors.status_removed.0)),
+        RowKind::Added => ('+', Style::default().fg(app.theme.colors.status_added.0)),
+        RowKind::Modified => ('~', Style::default().fg(app.theme.colors.status_modified.0)),
+    };
+
+    Line::from(vec![
+        Span::styled(
+            format!("{number:>gutter_width$} "),
+            Style::default()
+                .fg(app.theme.colors.text_dim.0)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled(format!("{marker} "), text_style),
+        Span::styled(text.clone(), text_style),
+    ])
 }
 
 pub fn render_warning_bar(f: &mut Frame, area: Rect, app: &App) {

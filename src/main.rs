@@ -6,6 +6,7 @@ mod icons;
 mod parser;
 mod persistence;
 mod render;
+mod side_by_side;
 mod theme;
 mod tree;
 
@@ -15,9 +16,10 @@ use crate::git::GitExecutor;
 use crate::parser::{DiffFileKey, DiffParser, FileDiff};
 use crate::persistence::PersistenceManager;
 use crate::render::{
-    render_diff_content, render_file_list, render_search_box, render_status_line,
-    render_warning_bar,
+    render_diff_content, render_file_list, render_search_box, render_side_by_side,
+    render_status_line, render_warning_bar,
 };
+use crate::side_by_side::AlignedRow;
 use crate::theme::Theme;
 use crate::tree::{FileTreeBuilder, FileTreeItem};
 use anyhow::Result;
@@ -38,6 +40,15 @@ use std::process::{Command, Stdio};
 // Constants for external tool integration
 const DEFAULT_TERMINAL_HEIGHT: &str = "50";
 const DEFAULT_TERMINAL_TYPE: &str = "xterm-256color";
+
+/// How the diff pane presents a file's changes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    /// Before/after panes rendered in-app (default)
+    SideBySide,
+    /// Raw unified diff, optionally piped through an external tool
+    Unified,
+}
 
 // Template variable values for command substitution
 #[derive(Debug, Clone)]
@@ -71,6 +82,8 @@ struct App {
     // UI state
     file_list_state: ListState,      // For stateful file tree scrolling
     warning_message: Option<String>, // Warning to display in the warning bar below the diff pane
+    view_mode: ViewMode,
+    aligned_rows: Option<Vec<AlignedRow>>, // Before/after rows for the current file
 }
 
 impl App {
@@ -116,7 +129,7 @@ impl App {
             .load_checked_files(&diff_keys)
             .unwrap_or_else(|_| std::collections::HashSet::new());
 
-        Ok(Self {
+        let mut app = Self {
             should_quit: false,
             config,
             theme,
@@ -141,7 +154,44 @@ impl App {
                 state
             },
             warning_message: None,
-        })
+            view_mode: ViewMode::SideBySide,
+            aligned_rows: None,
+        };
+        app.refresh_aligned_rows();
+        Ok(app)
+    }
+
+    fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::SideBySide => ViewMode::Unified,
+            ViewMode::Unified => ViewMode::SideBySide,
+        };
+        self.update_diff_content();
+    }
+
+    /// Recompute the before/after rows for the currently selected file
+    fn refresh_aligned_rows(&mut self) {
+        self.aligned_rows = None;
+        if self.view_mode != ViewMode::SideBySide {
+            return;
+        }
+
+        let Some(file_diff) = self
+            .get_current_file_tree_items()
+            .get(self.selected_index)
+            .and_then(|item| item.file_diff.clone())
+        else {
+            return;
+        };
+
+        // GitExecutor is stateless, and file/directory compare modes work
+        // without a repository, so a fresh instance always suffices
+        let executor = GitExecutor::new();
+        if let Ok((old_text, new_text)) =
+            executor.get_file_versions(&self.operation_mode, &file_diff)
+        {
+            self.aligned_rows = Some(side_by_side::align(&old_text, &new_text));
+        }
     }
 
     fn select_next(&mut self) {
@@ -199,6 +249,8 @@ impl App {
                 self.horizontal_scroll = 0;
             }
         }
+
+        self.refresh_aligned_rows();
     }
 
     fn apply_external_diff_tool(&mut self) {
@@ -1093,6 +1145,9 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                         }
                     }
 
+                    // Toggle between side-by-side and unified diff view
+                    KeyCode::Char('v') if !app.search_input_mode => app.toggle_view_mode(),
+
                     // Jump navigation (disabled only when typing in search)
                     KeyCode::Char('g') if !app.search_input_mode => app.jump_to_top(),
                     KeyCode::Char('G') if !app.search_input_mode => app.jump_to_bottom(),
@@ -1182,7 +1237,11 @@ fn ui(f: &mut Frame, app: &mut App) {
         .split(main_chunks[1]);
 
     render_status_line(f, right_chunks[0], app);
-    render_diff_content(f, right_chunks[1], app);
+    if app.view_mode == ViewMode::SideBySide && app.aligned_rows.is_some() {
+        render_side_by_side(f, right_chunks[1], app);
+    } else {
+        render_diff_content(f, right_chunks[1], app);
+    }
 
     // Render warning bar below diff content if present.
     // Guard on has_warning (not warning_message directly): rendering the
@@ -1303,6 +1362,41 @@ mod tests {
     }
 
     #[test]
+    fn test_render_side_by_side_panes() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let config = Config::default();
+        let file_diffs = vec![FileDiff {
+            filename: "test.rs".to_string(),
+            old_path: None,
+            new_path: None,
+            content: "-old line\n+new line\n same\n".to_string(),
+            added_lines: 1,
+            removed_lines: 1,
+            diff_key: None,
+        }];
+        let mut app = App::new(
+            config,
+            file_diffs,
+            OperationMode::Compare {
+                target1: "a".to_string(),
+                target2: "b".to_string(),
+            },
+        )
+        .unwrap();
+        app.aligned_rows = Some(side_by_side::align("old line\nsame\n", "new line\nsame\n"));
+
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(content.contains("Before"));
+        assert!(content.contains("After"));
+        assert!(content.contains("old line"));
+        assert!(content.contains("new line"));
+        assert!(content.contains("same"));
+    }
+
+    #[test]
     fn test_warning_set_mid_frame_does_not_panic() {
         let backend = TestBackend::new(90, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1334,6 +1428,8 @@ mod tests {
             },
         )
         .unwrap();
+        // External diff tools only run in the unified view
+        app.view_mode = ViewMode::Unified;
 
         // First frame lays out without a warning bar, then the failing
         // pager sets the warning while the diff pane renders - this must

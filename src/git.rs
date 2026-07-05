@@ -1,4 +1,5 @@
 use crate::cli::OperationMode;
+use crate::parser::FileDiff;
 use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -201,6 +202,111 @@ impl GitExecutor {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 Err(anyhow!("Git diff --no-index failed: {}", stderr))
             }
+        }
+    }
+
+    /// Old and new contents of a changed file, for side-by-side display.
+    /// Sides that do not exist (created/deleted files) come back as empty
+    /// strings; binary content surfaces as Err so callers can fall back
+    /// to the unified view.
+    pub fn get_file_versions(
+        &self,
+        mode: &OperationMode,
+        file_diff: &FileDiff,
+    ) -> Result<(String, String)> {
+        let old_rel = Self::side_path(file_diff.old_path.as_deref(), &file_diff.filename, "a/");
+        let new_rel = Self::side_path(file_diff.new_path.as_deref(), &file_diff.filename, "b/");
+
+        match mode {
+            OperationMode::GitWorkingDirectory | OperationMode::GitStatus => Ok((
+                self.blob_for_side(old_rel, ":")?,
+                Self::worktree_for_side(new_rel)?,
+            )),
+            OperationMode::GitCached => Ok((
+                self.blob_for_side(old_rel, "HEAD:")?,
+                self.blob_for_side(new_rel, ":")?,
+            )),
+            OperationMode::GitDiff { target } => Ok((
+                self.blob_for_side(old_rel, &format!("{target}:"))?,
+                Self::worktree_for_side(new_rel)?,
+            )),
+            OperationMode::GitCommit { commit } => {
+                let base = self.commit_diff_base(commit);
+                Ok((
+                    self.blob_for_side(old_rel, &format!("{base}:"))?,
+                    self.blob_for_side(new_rel, &format!("{commit}:"))?,
+                ))
+            }
+            OperationMode::Compare { target1, target2 } => {
+                if self.is_git_ref(target1)? && self.is_git_ref(target2)? {
+                    Ok((
+                        self.blob_for_side(old_rel, &format!("{target1}:"))?,
+                        self.blob_for_side(new_rel, &format!("{target2}:"))?,
+                    ))
+                } else {
+                    // File/directory compare: parsed paths resolve from the
+                    // invocation directory, not a repository root
+                    Ok((
+                        Self::read_text_or_empty(old_rel)?,
+                        Self::read_text_or_empty(new_rel)?,
+                    ))
+                }
+            }
+            OperationMode::Completions { .. } | OperationMode::Invalid { .. } => {
+                Err(anyhow!("Operation mode has no file versions"))
+            }
+        }
+    }
+
+    /// Repo-relative path for one diff side; None for /dev/null (no file)
+    fn side_path<'a>(path: Option<&'a str>, fallback: &'a str, prefix: &str) -> Option<&'a str> {
+        match path {
+            Some("/dev/null") => None,
+            Some(p) => Some(p.strip_prefix(prefix).unwrap_or(p)),
+            None => Some(fallback),
+        }
+    }
+
+    fn blob_for_side(&self, side: Option<&str>, rev_prefix: &str) -> Result<String> {
+        match side {
+            Some(path) => self.show_blob_or_empty(&format!("{rev_prefix}{path}")),
+            None => Ok(String::new()),
+        }
+    }
+
+    fn worktree_for_side(side: Option<&str>) -> Result<String> {
+        match side {
+            Some(path) => {
+                let root = Self::toplevel()?;
+                Self::read_text_or_empty(root.join(path).to_str())
+            }
+            None => Ok(String::new()),
+        }
+    }
+
+    /// Blob content at `<rev>:<path>`; empty when the path is absent in
+    /// that revision (created or deleted file)
+    fn show_blob_or_empty(&self, spec: &str) -> Result<String> {
+        let output = Command::new("git")
+            .args(["show", spec])
+            .output()
+            .context("Failed to execute git show")?;
+
+        if !output.status.success() {
+            return Ok(String::new());
+        }
+
+        String::from_utf8(output.stdout).context("File content is not valid UTF-8")
+    }
+
+    /// File content from disk; empty when the file does not exist
+    fn read_text_or_empty(path: Option<&str>) -> Result<String> {
+        let Some(path) = path else {
+            return Ok(String::new());
+        };
+        match std::fs::read(path) {
+            Ok(bytes) => String::from_utf8(bytes).context("File content is not valid UTF-8"),
+            Err(_) => Ok(String::new()),
         }
     }
 
