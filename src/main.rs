@@ -24,7 +24,9 @@ use crate::theme::Theme;
 use crate::tree::{FileTreeBuilder, FileTreeItem};
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -231,12 +233,17 @@ impl App {
                     self.diff_output = file_diff.content.clone();
                 }
 
-                // Apply external diff tool if configured
-                // Use terminal width for proper side-by-side display (lazygit style)
-                if let Ok((terminal_width, _)) = crossterm::terminal::size() {
-                    self.apply_external_diff_tool_with_width(Some(terminal_width));
+                // Apply external diff tool if configured (unified view only;
+                // the side-by-side panes render file contents in-app)
+                if self.view_mode == ViewMode::Unified {
+                    // Use terminal width for proper side-by-side display (lazygit style)
+                    if let Ok((terminal_width, _)) = crossterm::terminal::size() {
+                        self.apply_external_diff_tool_with_width(Some(terminal_width));
+                    } else {
+                        self.apply_external_diff_tool();
+                    }
                 } else {
-                    self.apply_external_diff_tool();
+                    self.warning_message = None;
                 }
 
                 // Reset scroll position when switching files
@@ -1086,109 +1093,128 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
 
         // Use poll to handle the case where stdin might not be available
         if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Release {
-                    continue;
-                }
-                match key.code {
-                    // Quit or exit search mode
-                    KeyCode::Char('q') => {
-                        if app.search_mode {
-                            app.exit_search_mode();
-                        } else {
-                            app.should_quit = true;
-                        }
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Release {
+                        continue;
                     }
-                    KeyCode::Esc => {
-                        if app.search_mode {
-                            app.exit_search_mode();
-                        } else {
-                            app.should_quit = true;
-                        }
-                    }
-
-                    // Search mode (use '/' key)
-                    KeyCode::Char('/') if !app.search_input_mode => {
-                        app.enter_search_mode();
-                    }
-
-                    // Enter to confirm search
-                    KeyCode::Enter if app.search_input_mode => {
-                        app.confirm_search();
-                    }
-
-                    // Backspace in search input mode
-                    KeyCode::Backspace if app.search_input_mode => {
-                        app.remove_search_char();
-                    }
-
-                    // File navigation (disabled only when actively typing in search)
-                    KeyCode::Down | KeyCode::Char('j') if !app.search_input_mode => {
-                        app.select_next()
-                    }
-                    KeyCode::Up | KeyCode::Char('k') if !app.search_input_mode => {
-                        app.select_previous()
-                    }
-
-                    // Handle character input in search input mode (must be after other char handlers)
-                    KeyCode::Char(c) if app.search_input_mode => {
-                        app.add_search_char(c);
-                    }
-                    KeyCode::Enter => {
-                        // Toggle directory expansion/collapse or update diff view
-                        if let Some(tree_item) = app.file_tree_items.get(app.selected_index) {
-                            if tree_item.is_directory {
-                                app.toggle_directory();
+                    match key.code {
+                        // Quit or exit search mode
+                        KeyCode::Char('q') => {
+                            if app.search_mode {
+                                app.exit_search_mode();
                             } else {
-                                app.update_diff_content();
+                                app.should_quit = true;
                             }
                         }
-                    }
+                        KeyCode::Esc => {
+                            if app.search_mode {
+                                app.exit_search_mode();
+                            } else {
+                                app.should_quit = true;
+                            }
+                        }
 
-                    // Toggle between side-by-side and unified diff view
-                    KeyCode::Char('v') if !app.search_input_mode => app.toggle_view_mode(),
+                        // Search mode (use '/' key)
+                        KeyCode::Char('/') if !app.search_input_mode => {
+                            app.enter_search_mode();
+                        }
 
-                    // Jump navigation (disabled only when typing in search)
-                    KeyCode::Char('g') if !app.search_input_mode => app.jump_to_top(),
-                    KeyCode::Char('G') if !app.search_input_mode => app.jump_to_bottom(),
+                        // Enter to confirm search
+                        KeyCode::Enter if app.search_input_mode => {
+                            app.confirm_search();
+                        }
 
-                    // Vertical scrolling (disabled only when typing in search)
-                    KeyCode::Char('e') | KeyCode::Char('J') if !app.search_input_mode => {
-                        app.scroll_down(1)
-                    }
-                    KeyCode::Char('y') | KeyCode::Char('K') if !app.search_input_mode => {
-                        app.scroll_up(1)
-                    }
-                    KeyCode::Char('d') | KeyCode::PageDown if !app.search_input_mode => {
-                        app.scroll_down(10)
-                    }
-                    KeyCode::Char('u') | KeyCode::PageUp if !app.search_input_mode => {
-                        app.scroll_up(10)
-                    }
-                    KeyCode::Char('f') if !app.search_input_mode => app.scroll_down(20),
-                    KeyCode::Char('b') if !app.search_input_mode => app.scroll_up(20),
+                        // Backspace in search input mode
+                        KeyCode::Backspace if app.search_input_mode => {
+                            app.remove_search_char();
+                        }
 
-                    // Horizontal scrolling (disabled only when typing in search)
-                    KeyCode::Char('h') | KeyCode::Left if !app.search_input_mode => {
-                        app.scroll_left(5)
-                    }
-                    KeyCode::Char('l') | KeyCode::Right if !app.search_input_mode => {
-                        app.scroll_right(5)
-                    }
-                    KeyCode::Char('H') if !app.search_input_mode => app.scroll_left(20),
-                    KeyCode::Char('L') if !app.search_input_mode => app.scroll_right(20),
+                        // File navigation (disabled only when actively typing in search)
+                        KeyCode::Down | KeyCode::Char('j') if !app.search_input_mode => {
+                            app.select_next()
+                        }
+                        KeyCode::Up | KeyCode::Char('k') if !app.search_input_mode => {
+                            app.select_previous()
+                        }
 
-                    // Space key (disabled only when typing in search)
-                    KeyCode::Char(' ') if !app.search_input_mode => {
-                        // File is already selected, just update view
-                        app.update_diff_content();
+                        // Handle character input in search input mode (must be after other char handlers)
+                        KeyCode::Char(c) if app.search_input_mode => {
+                            app.add_search_char(c);
+                        }
+                        KeyCode::Enter => {
+                            // Toggle directory expansion/collapse or update diff view
+                            if let Some(tree_item) = app.file_tree_items.get(app.selected_index) {
+                                if tree_item.is_directory {
+                                    app.toggle_directory();
+                                } else {
+                                    app.update_diff_content();
+                                }
+                            }
+                        }
+
+                        // Toggle between side-by-side and unified diff view
+                        KeyCode::Char('v') if !app.search_input_mode => app.toggle_view_mode(),
+
+                        // Jump navigation (disabled only when typing in search)
+                        KeyCode::Char('g') if !app.search_input_mode => app.jump_to_top(),
+                        KeyCode::Char('G') if !app.search_input_mode => app.jump_to_bottom(),
+
+                        // Vertical scrolling (disabled only when typing in search)
+                        KeyCode::Char('e') | KeyCode::Char('J') if !app.search_input_mode => {
+                            app.scroll_down(1)
+                        }
+                        KeyCode::Char('y') | KeyCode::Char('K') if !app.search_input_mode => {
+                            app.scroll_up(1)
+                        }
+                        KeyCode::Char('d') | KeyCode::PageDown if !app.search_input_mode => {
+                            app.scroll_down(10)
+                        }
+                        KeyCode::Char('u') | KeyCode::PageUp if !app.search_input_mode => {
+                            app.scroll_up(10)
+                        }
+                        KeyCode::Char('f') if !app.search_input_mode => app.scroll_down(20),
+                        KeyCode::Char('b') if !app.search_input_mode => app.scroll_up(20),
+
+                        // Horizontal scrolling (disabled only when typing in search)
+                        KeyCode::Char('h') | KeyCode::Left if !app.search_input_mode => {
+                            app.scroll_left(5)
+                        }
+                        KeyCode::Char('l') | KeyCode::Right if !app.search_input_mode => {
+                            app.scroll_right(5)
+                        }
+                        KeyCode::Char('H') if !app.search_input_mode => app.scroll_left(20),
+                        KeyCode::Char('L') if !app.search_input_mode => app.scroll_right(20),
+
+                        // Space key (disabled only when typing in search)
+                        KeyCode::Char(' ') if !app.search_input_mode => {
+                            // File is already selected, just update view
+                            app.update_diff_content();
+                        }
+
+                        // Checkbox toggle (works in both modes)
+                        KeyCode::Tab => app.toggle_file_checked(),
+
+                        _ => {}
                     }
-
-                    // Checkbox toggle (works in both modes)
-                    KeyCode::Tab => app.toggle_file_checked(),
-
-                    _ => {}
                 }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                        let width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(0);
+                        // Wheel over the file list moves the selection; over
+                        // the diff area it scrolls the content (layout is 20/80)
+                        let over_file_list = mouse.column < width / 5;
+                        let scroll_down = mouse.kind == MouseEventKind::ScrollDown;
+                        match (over_file_list, scroll_down) {
+                            (true, true) => app.select_next(),
+                            (true, false) => app.select_previous(),
+                            (false, true) => app.scroll_down(3),
+                            (false, false) => app.scroll_up(3),
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
             }
         }
 
