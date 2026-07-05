@@ -109,6 +109,10 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff_command: Option<DiffCommand>,
 
+    /// Show changed files as a flat list instead of a tree
+    #[serde(default)]
+    pub flat_file_list: bool,
+
     #[serde(default)]
     pub theme: Theme,
 }

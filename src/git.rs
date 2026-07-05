@@ -1,6 +1,6 @@
 use crate::cli::OperationMode;
 use anyhow::{Context, Result, anyhow};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Git command executor for getting diff data
@@ -23,13 +23,13 @@ impl GitExecutor {
     /// Get diff output based on operation mode
     pub fn get_diff(&self, mode: &OperationMode) -> Result<String> {
         match mode {
-            OperationMode::GitWorkingDirectory => self.execute_git_diff(&["diff"]),
+            OperationMode::GitWorkingDirectory | OperationMode::GitStatus => {
+                let mut diff = self.execute_git_diff(&["diff"])?;
+                diff.push_str(&self.untracked_files_diff()?);
+                Ok(diff)
+            }
             OperationMode::GitCached => self.execute_git_diff(&["diff", "--cached"]),
             OperationMode::GitDiff { target } => self.execute_git_diff(&["diff", target]),
-            OperationMode::GitStatus => {
-                // For status, we might want to show multiple diffs
-                self.execute_git_diff(&["diff"])
-            }
             OperationMode::Compare { target1, target2 } => {
                 // Check if both targets are git refs
                 if self.is_git_ref(target1)? && self.is_git_ref(target2)? {
@@ -82,14 +82,21 @@ impl GitExecutor {
     /// Get diff for a specific file
     pub fn get_file_diff(&self, mode: &OperationMode, file_path: &str) -> Result<String> {
         match mode {
-            OperationMode::GitWorkingDirectory => self.execute_git_diff(&["diff", "--", file_path]),
+            OperationMode::GitWorkingDirectory | OperationMode::GitStatus => {
+                let diff = self.execute_git_diff(&["diff", "--", file_path])?;
+                if diff.is_empty() {
+                    // Untracked files produce no output from `git diff`
+                    self.untracked_file_diff(file_path)
+                } else {
+                    Ok(diff)
+                }
+            }
             OperationMode::GitCached => {
                 self.execute_git_diff(&["diff", "--cached", "--", file_path])
             }
             OperationMode::GitDiff { target } => {
                 self.execute_git_diff(&["diff", target, "--", file_path])
             }
-            OperationMode::GitStatus => self.execute_git_diff(&["diff", "--", file_path]),
             OperationMode::Compare { target1, target2 } => {
                 if self.is_git_ref(target1)? && self.is_git_ref(target2)? {
                     self.execute_git_diff(&[
@@ -151,12 +158,22 @@ impl GitExecutor {
     /// Unlike plain `diff -u`, this emits `diff --git` headers that
     /// DiffParser expects, and requires no external diff binary.
     fn execute_regular_diff(&self, file1: &str, file2: &str) -> Result<String> {
-        // Forward slashes keep the generated headers unquoted on Windows
-        let target1 = file1.replace('\\', "/");
-        let target2 = file2.replace('\\', "/");
+        Self::no_index_diff(file1, file2, None)
+    }
 
-        let output = Command::new("git")
-            .args(["diff", "--no-index", "--", &target1, &target2])
+    /// Run `git diff --no-index` between two paths, optionally from a
+    /// specific working directory (for repo-root-relative paths)
+    fn no_index_diff(path1: &str, path2: &str, cwd: Option<&Path>) -> Result<String> {
+        // Forward slashes keep the generated headers unquoted on Windows
+        let target1 = path1.replace('\\', "/");
+        let target2 = path2.replace('\\', "/");
+
+        let mut cmd = Command::new("git");
+        cmd.args(["diff", "--no-index", "--", &target1, &target2]);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        let output = cmd
             .output()
             .context("Failed to execute git diff --no-index")?;
 
@@ -170,6 +187,75 @@ impl GitExecutor {
                 Err(anyhow!("Git diff --no-index failed: {}", stderr))
             }
         }
+    }
+
+    /// Repository root of the current working directory
+    fn toplevel() -> Result<PathBuf> {
+        let output = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .context("Failed to locate repository root")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Not in a git repository: {}", stderr));
+        }
+
+        let path =
+            String::from_utf8(output.stdout).context("Repository root is not valid UTF-8")?;
+        Ok(PathBuf::from(path.trim()))
+    }
+
+    /// Render every untracked file as an all-added diff, since plain
+    /// `git diff` omits files that were never added to the index
+    fn untracked_files_diff(&self) -> Result<String> {
+        Self::untracked_files_diff_in(&Self::toplevel()?)
+    }
+
+    fn untracked_files_diff_in(repo_root: &Path) -> Result<String> {
+        let mut result = String::new();
+        for file in Self::list_untracked_in(repo_root)? {
+            result.push_str(&Self::no_index_diff("/dev/null", &file, Some(repo_root))?);
+        }
+        Ok(result)
+    }
+
+    /// Untracked files (recursive, .gitignore respected), relative to repo_root
+    fn list_untracked_in(repo_root: &Path) -> Result<Vec<String>> {
+        let output = Command::new("git")
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .current_dir(repo_root)
+            .output()
+            .context("Failed to list untracked files")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("git ls-files failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8(output.stdout).context("Git output is not valid UTF-8")?;
+        Ok(stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_string())
+            .collect())
+    }
+
+    /// All-added diff for a single untracked file; empty if the file is tracked
+    fn untracked_file_diff(&self, file_path: &str) -> Result<String> {
+        let repo_root = Self::toplevel()?;
+
+        let tracked = Command::new("git")
+            .args(["ls-files", "--error-unmatch", "--", file_path])
+            .current_dir(&repo_root)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if tracked {
+            return Ok(String::new());
+        }
+
+        Self::no_index_diff("/dev/null", file_path, Some(&repo_root))
     }
 
     /// Check if a string is a valid git ref
@@ -238,6 +324,33 @@ mod tests {
         assert!(output.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_untracked_files_diff_in_git_format() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path();
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+
+        std::fs::create_dir(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("sub").join("new.txt"), "added line\n").unwrap();
+
+        let untracked = GitExecutor::list_untracked_in(repo).unwrap();
+        assert_eq!(untracked, vec!["sub/new.txt".to_string()]);
+
+        let diff = GitExecutor::untracked_files_diff_in(repo).unwrap();
+        assert!(diff.contains("diff --git"), "got: {diff}");
+        assert!(diff.contains("+added line"), "got: {diff}");
+
+        let parsed = crate::parser::DiffParser::parse(&diff);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].filename, "sub/new.txt");
+        assert_eq!(parsed[0].added_lines, 1);
     }
 
     #[test]

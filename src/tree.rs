@@ -37,6 +37,30 @@ impl FileTreeBuilder {
         Self::build_file_tree_with_collapsed(file_diffs, &HashSet::new())
     }
 
+    /// Build a flat, hierarchy-free list: one entry per changed file,
+    /// labeled with its full path
+    pub fn build_flat_list(file_diffs: &[FileDiff]) -> Vec<FileTreeItem> {
+        let mut sorted_diffs = file_diffs.to_vec();
+        sorted_diffs.sort_by_key(|diff| diff.filename.to_lowercase());
+
+        sorted_diffs
+            .into_iter()
+            .map(|file_diff| FileTreeItem {
+                name: file_diff.filename.clone(),
+                full_path: file_diff.filename.clone(),
+                is_directory: false,
+                depth: 0,
+                file_diff: Some(file_diff),
+                is_last_child: true,
+                parent_is_last: Vec::new(),
+                is_expanded: true,
+                dir_file_count: 0,
+                dir_added_lines: 0,
+                dir_removed_lines: 0,
+            })
+            .collect()
+    }
+
     pub fn build_file_tree_with_collapsed(
         file_diffs: &[FileDiff],
         collapsed_dirs: &HashSet<String>,
@@ -272,5 +296,43 @@ impl FileTreeBuilder {
         if depth > 0 && !parent_is_last.is_empty() {
             parent_is_last.truncate(depth);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_diff(filename: &str) -> FileDiff {
+        FileDiff {
+            filename: filename.to_string(),
+            old_path: Some(format!("a/{filename}")),
+            new_path: Some(format!("b/{filename}")),
+            content: String::new(),
+            added_lines: 1,
+            removed_lines: 0,
+            diff_key: None,
+        }
+    }
+
+    #[test]
+    fn test_build_flat_list() {
+        let diffs = vec![
+            make_diff("src/deep/nested/file.rs"),
+            make_diff("README.md"),
+            make_diff("src/main.rs"),
+        ];
+
+        let items = FileTreeBuilder::build_flat_list(&diffs);
+
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().all(|item| !item.is_directory));
+        assert!(items.iter().all(|item| item.depth == 0));
+        assert!(items.iter().all(|item| item.file_diff.is_some()));
+        // Sorted case-insensitively by full path, full path used as label
+        assert_eq!(items[0].name, "README.md");
+        assert_eq!(items[1].name, "src/deep/nested/file.rs");
+        assert_eq!(items[2].name, "src/main.rs");
+        assert_eq!(items[1].full_path, "src/deep/nested/file.rs");
     }
 }

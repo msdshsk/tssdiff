@@ -20,6 +20,10 @@ pub struct Cli {
     #[arg(long, short)]
     pub worktree: bool,
 
+    /// Show changed files as a flat list instead of a tree
+    #[arg(long, short = 'f')]
+    pub flat: bool,
+
     /// Configuration file path
     #[arg(long, value_name = "FILE")]
     pub config: Option<String>,
@@ -167,6 +171,7 @@ mod tests {
             targets: vec![],
             cached: false,
             worktree: false,
+            flat: false,
             config: None,
             verbose: false,
         };
@@ -184,6 +189,7 @@ mod tests {
             targets: vec![],
             cached: true,
             worktree: false,
+            flat: false,
             config: None,
             verbose: false,
         };
@@ -201,6 +207,7 @@ mod tests {
             targets: vec!["branch1".to_string()],
             cached: false,
             worktree: false,
+            flat: false,
             config: None,
             verbose: false,
         };
@@ -218,6 +225,7 @@ mod tests {
             targets: vec!["branch1".to_string(), "branch2".to_string()],
             cached: false,
             worktree: false,
+            flat: false,
             config: None,
             verbose: false,
         };

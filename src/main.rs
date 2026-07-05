@@ -79,7 +79,11 @@ impl App {
         file_diffs: Vec<FileDiff>,
         operation_mode: OperationMode,
     ) -> Result<Self> {
-        let file_tree_items = FileTreeBuilder::build_file_tree(&file_diffs);
+        let file_tree_items = if config.flat_file_list {
+            FileTreeBuilder::build_flat_list(&file_diffs)
+        } else {
+            FileTreeBuilder::build_file_tree(&file_diffs)
+        };
         let theme = config.theme.clone();
 
         let diff_output = if file_tree_items.is_empty() {
@@ -668,10 +672,14 @@ impl App {
 
     fn rebuild_file_tree(&mut self) {
         // Use original file diffs instead of extracting from current items
-        self.file_tree_items = FileTreeBuilder::build_file_tree_with_collapsed(
-            &self.original_file_diffs,
-            &self.collapsed_directories,
-        );
+        self.file_tree_items = if self.config.flat_file_list {
+            FileTreeBuilder::build_flat_list(&self.original_file_diffs)
+        } else {
+            FileTreeBuilder::build_file_tree_with_collapsed(
+                &self.original_file_diffs,
+                &self.collapsed_directories,
+            )
+        };
 
         // Adjust selected index if needed
         if self.selected_index >= self.file_tree_items.len() {
@@ -901,11 +909,14 @@ fn main() -> Result<()> {
     }
 
     // Load configuration
-    let config = if let Some(config_path) = cli.config {
+    let mut config = if let Some(config_path) = cli.config {
         Config::load_from_path(&config_path)?
     } else {
         Config::load()?
     };
+    if cli.flat {
+        config.flat_file_list = true;
+    }
 
     // Check if we need a git repository
     if operation_mode.requires_git_repo() && !GitExecutor::is_git_repo() {
@@ -1173,8 +1184,11 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_status_line(f, right_chunks[0], app);
     render_diff_content(f, right_chunks[1], app);
 
-    // Render warning bar below diff content if present
-    if app.warning_message.is_some() {
+    // Render warning bar below diff content if present.
+    // Guard on has_warning (not warning_message directly): rendering the
+    // diff pane above may set a warning mid-frame, but the layout was
+    // already computed without the bar - it will show on the next draw.
+    if has_warning {
         render_warning_bar(f, right_chunks[2], app);
     }
 }
@@ -1286,6 +1300,51 @@ mod tests {
         let content = buffer_to_string(buffer);
         assert!(content.contains("Warning"));
         assert!(content.contains("Failed to process with diff tool"));
+    }
+
+    #[test]
+    fn test_warning_set_mid_frame_does_not_panic() {
+        let backend = TestBackend::new(90, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let config = Config {
+            git: crate::config::GitConfig {
+                paging: crate::config::GitPagingConfig {
+                    pager: "nonexistent_diff_tool_xyz".to_string(),
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        };
+
+        let file_diffs = vec![FileDiff {
+            filename: "test.rs".to_string(),
+            old_path: None,
+            new_path: None,
+            content: "+added".to_string(),
+            added_lines: 1,
+            removed_lines: 0,
+            diff_key: None,
+        }];
+        let mut app = App::new(
+            config,
+            file_diffs,
+            OperationMode::Compare {
+                target1: "a".to_string(),
+                target2: "b".to_string(),
+            },
+        )
+        .unwrap();
+
+        // First frame lays out without a warning bar, then the failing
+        // pager sets the warning while the diff pane renders - this must
+        // not panic even though the bar's area was never allocated
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+        assert!(app.warning_message.is_some());
+
+        // The warning bar appears on the next frame
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(content.contains("Warning"));
     }
 
     fn buffer_to_string(buffer: &Buffer) -> String {
