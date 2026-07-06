@@ -600,6 +600,31 @@ impl App {
         self.refresh_aligned_rows();
     }
 
+    /// Switch the file list between flat full-path and directory tree,
+    /// keeping the current file selected
+    fn toggle_flat_view(&mut self) {
+        self.config.flat_file_list = !self.config.flat_file_list;
+
+        let selected_path = self
+            .get_current_file_tree_items()
+            .get(self.selected_index)
+            .map(|item| item.full_path.clone());
+
+        self.rebuild_file_tree();
+        if self.search_mode {
+            self.update_search_filter();
+        } else {
+            self.filtered_file_tree_items = self.file_tree_items.clone();
+        }
+
+        let items = self.get_current_file_tree_items();
+        self.selected_index = selected_path
+            .and_then(|path| items.iter().position(|item| item.full_path == path))
+            .unwrap_or(0);
+        self.file_list_state.select(Some(self.selected_index));
+        self.update_diff_content();
+    }
+
     /// Route navigation keys to whichever list the left pane shows
     fn nav_next(&mut self) {
         match self.left_pane {
@@ -1804,13 +1829,32 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                             app.remove_search_char();
                         }
 
-                        // List navigation (disabled only when actively typing in search)
+                        // Force a full repaint for terminals that garbled the
+                        // screen (embedded xterms, resizes, ...)
+                        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            terminal.clear()?;
+                        }
+
+                        // Editor-style diff scrolling; the History pane keeps
+                        // j/k for commit selection
                         KeyCode::Down | KeyCode::Char('j') if !app.search_input_mode => {
-                            app.nav_next()
+                            if app.left_pane == LeftPane::History {
+                                app.history_move(1);
+                            } else {
+                                app.scroll_down(1);
+                            }
                         }
                         KeyCode::Up | KeyCode::Char('k') if !app.search_input_mode => {
-                            app.nav_previous()
+                            if app.left_pane == LeftPane::History {
+                                app.history_move(-1);
+                            } else {
+                                app.scroll_up(1);
+                            }
                         }
+
+                        // Tab / Shift+Tab move through the left pane list
+                        KeyCode::Tab if !app.search_input_mode => app.nav_next(),
+                        KeyCode::BackTab if !app.search_input_mode => app.nav_previous(),
 
                         // Handle character input in search input mode (must be after other char handlers)
                         KeyCode::Char(c) if app.search_input_mode => {
@@ -1877,17 +1921,18 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                         // Toggle condensed (hunks-only) vs full file view
                         KeyCode::Char('x') if !app.search_input_mode => app.toggle_condensed(),
 
+                        // Toggle flat list vs directory tree
+                        KeyCode::Char('t')
+                            if !app.search_input_mode && app.left_pane == LeftPane::Files =>
+                        {
+                            app.toggle_flat_view()
+                        }
+
                         // Jump navigation (disabled only when typing in search)
                         KeyCode::Char('g') if !app.search_input_mode => app.nav_first(),
                         KeyCode::Char('G') if !app.search_input_mode => app.nav_last(),
 
                         // Vertical scrolling (disabled only when typing in search)
-                        KeyCode::Char('e') | KeyCode::Char('J') if !app.search_input_mode => {
-                            app.scroll_down(1)
-                        }
-                        KeyCode::Char('y') | KeyCode::Char('K') if !app.search_input_mode => {
-                            app.scroll_up(1)
-                        }
                         KeyCode::Char('d') | KeyCode::PageDown if !app.search_input_mode => {
                             app.scroll_down(10)
                         }
@@ -1907,16 +1952,10 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                         KeyCode::Char('H') if !app.search_input_mode => app.scroll_left(20),
                         KeyCode::Char('L') if !app.search_input_mode => app.scroll_right(20),
 
-                        // Space key (disabled only when typing in search)
+                        // Checkbox toggle (file list only)
                         KeyCode::Char(' ')
                             if !app.search_input_mode && app.left_pane == LeftPane::Files =>
                         {
-                            // File is already selected, just update view
-                            app.update_diff_content();
-                        }
-
-                        // Checkbox toggle (file list only)
-                        KeyCode::Tab if app.left_pane == LeftPane::Files => {
                             app.toggle_file_checked()
                         }
 

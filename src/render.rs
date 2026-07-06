@@ -209,7 +209,7 @@ pub fn render_commit_input(f: &mut Frame, area: Rect, app: &App) {
 
 pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
     let width = 60.min(area.width.saturating_sub(2));
-    let height = 30.min(area.height.saturating_sub(2));
+    let height = 32.min(area.height.saturating_sub(2));
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -240,27 +240,29 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
 
     let lines = vec![
         section(" Navigation"),
-        entry("j/k, Up/Down", "select file / commit"),
+        entry("Tab / Shift+Tab", "next / previous file・commit"),
         entry("g / G", "first / last entry"),
         entry("Enter", "open commit / toggle directory"),
         entry("Esc", "back (Files <-> History), close help"),
         entry("1 / 2", "Files pane / History pane"),
         Line::default(),
         section(" View"),
+        entry("j/k, Up/Down", "scroll diff 1 line (History: select)"),
+        entry("d/u, PgDn/PgUp", "scroll diff 10 lines"),
+        entry("f / b", "scroll diff 20 lines"),
+        entry("h/l, H/L", "scroll horizontally 5 / 20 cols"),
         entry("v", "side-by-side <-> unified diff"),
         entry("x", "condensed (hunks) <-> full file"),
-        entry("e/y, d/u, f/b", "scroll diff 1 / 10 / 20 lines"),
-        entry("PgDn / PgUp", "scroll diff 10 lines"),
-        entry("h/l, H/L", "scroll horizontally 5 / 20 cols"),
+        entry("t", "flat list <-> directory tree"),
+        entry("Ctrl+L", "force full repaint"),
         Line::default(),
         section(" Files"),
         entry("/", "filter file list"),
-        entry("Tab", "mark file as reviewed"),
+        entry("Space", "mark file as reviewed"),
         entry("s / S", "stage / unstage checked files"),
         entry("C", "commit staged changes"),
         entry("o", "open file in editor"),
         entry("r", "reload diffs"),
-        entry("Space", "refresh diff view"),
         Line::default(),
         section(" Mouse"),
         entry("click", "select entry / menu, click again: open"),
