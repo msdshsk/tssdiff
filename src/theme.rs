@@ -136,10 +136,30 @@ pub struct ColorScheme {
     // Warning colors
     #[serde(default = "default_warning_border")]
     pub warning_border: ThemeColor,
+
+    // Row background tints for the side-by-side panes
+    #[serde(default = "default_diff_added_bg")]
+    pub diff_added_bg: ThemeColor,
+    #[serde(default = "default_diff_removed_bg")]
+    pub diff_removed_bg: ThemeColor,
+    #[serde(default = "default_diff_modified_bg")]
+    pub diff_modified_bg: ThemeColor,
 }
 
 fn default_warning_border() -> ThemeColor {
     ThemeColor(Color::Yellow)
+}
+
+fn default_diff_added_bg() -> ThemeColor {
+    ThemeColor(Color::Rgb(18, 48, 24))
+}
+
+fn default_diff_removed_bg() -> ThemeColor {
+    ThemeColor(Color::Rgb(58, 22, 22))
+}
+
+fn default_diff_modified_bg() -> ThemeColor {
+    ThemeColor(Color::Rgb(50, 42, 14))
 }
 
 impl Default for ColorScheme {
@@ -181,6 +201,11 @@ impl ColorScheme {
 
             // Warning colors
             warning_border: ThemeColor(Color::Yellow),
+
+            // Side-by-side row background tints
+            diff_added_bg: default_diff_added_bg(),
+            diff_removed_bg: default_diff_removed_bg(),
+            diff_modified_bg: default_diff_modified_bg(),
         }
     }
 }

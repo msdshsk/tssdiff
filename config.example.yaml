@@ -13,6 +13,15 @@ icon_mode: emoji
 # Empty falls back to $EDITOR, then the OS default application
 editor: ''
 
+# Syntax highlighting in the side-by-side panes (needs a truecolor
+# terminal such as Windows Terminal)
+syntax_highlight: true
+
+# Syntect theme: base16-ocean.dark, base16-eighties.dark,
+# base16-mocha.dark, base16-ocean.light, InspiredGitHub,
+# Solarized (dark), Solarized (light)
+syntax_theme: base16-ocean.dark
+
 # The diff pane defaults to built-in side-by-side before/after panes
 # (no external tools needed). Press 'v' in the app to switch to the
 # unified view, where the external tools configured below apply.

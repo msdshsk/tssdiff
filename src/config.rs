@@ -100,7 +100,7 @@ pub struct GitConfig {
     pub paging: GitPagingConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub git: GitConfig,
@@ -122,8 +122,39 @@ pub struct Config {
     #[serde(default)]
     pub editor: String,
 
+    /// Syntax highlighting in the side-by-side panes
+    #[serde(default = "default_syntax_highlight")]
+    pub syntax_highlight: bool,
+
+    /// Syntect theme name for syntax highlighting
+    #[serde(default = "default_syntax_theme")]
+    pub syntax_theme: String,
+
     #[serde(default)]
     pub theme: Theme,
+}
+
+fn default_syntax_highlight() -> bool {
+    true
+}
+
+fn default_syntax_theme() -> String {
+    "base16-ocean.dark".to_string()
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            git: GitConfig::default(),
+            diff_command: None,
+            flat_file_list: false,
+            icon_mode: IconMode::default(),
+            editor: String::new(),
+            syntax_highlight: default_syntax_highlight(),
+            syntax_theme: default_syntax_theme(),
+            theme: Theme::default(),
+        }
+    }
 }
 
 /// Icon set for the file tree. Nerd requires a Nerd Font patched

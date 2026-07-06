@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod diff;
 mod git;
+mod highlight;
 mod icons;
 mod parser;
 mod persistence;
@@ -13,6 +14,7 @@ mod tree;
 use crate::cli::{Cli, OperationMode};
 use crate::config::{Config, DiffCommandType};
 use crate::git::{CommitInfo, GitExecutor, GraphRow};
+use crate::highlight::HighlightedLines;
 use crate::parser::{DiffFileKey, DiffParser, FileDiff};
 use crate::persistence::PersistenceManager;
 use crate::render::{
@@ -114,6 +116,7 @@ struct App {
     warning_message: Option<String>, // Warning to display in the warning bar below the diff pane
     view_mode: ViewMode,
     aligned_rows: Option<Vec<AlignedRow>>, // Before/after rows for the current file
+    highlighted: Option<(HighlightedLines, HighlightedLines)>, // Syntax colors per side
     // Commit history browsing
     left_pane: LeftPane,
     commits: Vec<CommitInfo>,     // Loaded lazily when History opens
@@ -201,6 +204,7 @@ impl App {
             warning_message: None,
             view_mode: ViewMode::SideBySide,
             aligned_rows: None,
+            highlighted: None,
             left_pane: LeftPane::Files,
             commits: Vec::new(),
             commit_index: 0,
@@ -531,6 +535,7 @@ impl App {
     /// Recompute the before/after rows for the currently selected file
     fn refresh_aligned_rows(&mut self) {
         self.aligned_rows = None;
+        self.highlighted = None;
         if self.view_mode != ViewMode::SideBySide {
             return;
         }
@@ -550,6 +555,14 @@ impl App {
             executor.get_file_versions(&self.operation_mode, &file_diff)
         {
             self.aligned_rows = Some(side_by_side::align(&old_text, &new_text));
+            if self.config.syntax_highlight {
+                self.highlighted = highlight::highlight_pair(
+                    &file_diff.filename,
+                    &old_text,
+                    &new_text,
+                    &self.config.syntax_theme,
+                );
+            }
         }
     }
 

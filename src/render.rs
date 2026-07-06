@@ -788,23 +788,55 @@ fn side_line(row: &AlignedRow, old_side: bool, gutter_width: usize, app: &App) -
         ));
     };
 
-    let (marker, text_style) = match row.kind {
-        RowKind::Context => (' ', Style::default().fg(app.theme.colors.text_primary.0)),
-        RowKind::Removed => ('-', Style::default().fg(app.theme.colors.status_removed.0)),
-        RowKind::Added => ('+', Style::default().fg(app.theme.colors.status_added.0)),
-        RowKind::Modified => ('~', Style::default().fg(app.theme.colors.status_modified.0)),
+    let (marker, kind_color, row_bg) = match row.kind {
+        RowKind::Context => (' ', app.theme.colors.text_primary.0, None),
+        RowKind::Removed => (
+            '-',
+            app.theme.colors.status_removed.0,
+            Some(app.theme.colors.diff_removed_bg.0),
+        ),
+        RowKind::Added => (
+            '+',
+            app.theme.colors.status_added.0,
+            Some(app.theme.colors.diff_added_bg.0),
+        ),
+        RowKind::Modified => (
+            '~',
+            app.theme.colors.status_modified.0,
+            Some(app.theme.colors.diff_modified_bg.0),
+        ),
     };
 
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!("{number:>gutter_width$} "),
             Style::default()
                 .fg(app.theme.colors.text_dim.0)
                 .add_modifier(Modifier::DIM),
         ),
-        Span::styled(format!("{marker} "), text_style),
-        Span::styled(text.clone(), text_style),
-    ])
+        Span::styled(format!("{marker} "), Style::default().fg(kind_color)),
+    ];
+
+    // Syntax colors when available; the row kind then shows via the
+    // background tint instead of the text color
+    let highlighted_segments = app.highlighted.as_ref().and_then(|(old_hl, new_hl)| {
+        let table = if old_side { old_hl } else { new_hl };
+        table.get(number - 1)
+    });
+    match highlighted_segments {
+        Some(segments) => {
+            for (color, segment) in segments {
+                spans.push(Span::styled(segment.clone(), Style::default().fg(*color)));
+            }
+        }
+        None => spans.push(Span::styled(text.clone(), Style::default().fg(kind_color))),
+    }
+
+    let line = Line::from(spans);
+    match row_bg {
+        Some(bg) => line.style(Style::default().bg(bg)),
+        None => line,
+    }
 }
 
 pub fn render_warning_bar(f: &mut Frame, area: Rect, app: &App) {
