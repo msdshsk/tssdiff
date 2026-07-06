@@ -75,7 +75,10 @@ pub fn render_commit_list(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Virtual entry for the current working tree
     let working_tree_line = Line::from(Span::styled(
-        "● Working tree",
+        format!(
+            "{} Working tree",
+            crate::icons::bullet(app.config.icon_mode)
+        ),
         Style::default().fg(app.theme.colors.status_added.0),
     ));
     items.push(
@@ -190,13 +193,20 @@ pub fn render_commit_input(f: &mut Frame, area: Rect, app: &App) {
         height: 3,
     };
 
+    let cursor = match app.config.icon_mode {
+        crate::config::IconMode::Ascii => "_",
+        _ => "▏",
+    };
     f.render_widget(Clear, popup);
     let input = Paragraph::new(Line::from(vec![
         Span::styled(
             format!(" {}", app.commit_message),
             Style::default().fg(app.theme.colors.text_primary.0),
         ),
-        Span::styled("▏", Style::default().fg(app.theme.colors.border_focused.0)),
+        Span::styled(
+            cursor,
+            Style::default().fg(app.theme.colors.border_focused.0),
+        ),
     ]))
     .block(
         Block::default()
@@ -303,18 +313,21 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
             // Build tree structure with styled spans
             let mut spans = Vec::new();
 
-            // Build tree prefix using diffnav-style logic
+            // Build tree prefix using diffnav-style logic (ASCII fallback
+            // avoids ambiguous-width glyphs on xterm-like terminals)
+            let (vertical_line, last_branch, branch) =
+                crate::icons::tree_parts(app.config.icon_mode);
             let mut tree_parts = Vec::new();
 
             // Add vertical lines for ancestor levels
-            // For each ancestor level, show │ if that ancestor is NOT the last child
-            // diffnav uses 2 characters per level
+            // For each ancestor level, show a line if that ancestor is NOT
+            // the last child (2 characters per level, like diffnav)
             for i in 0..tree_item.depth {
                 if i < tree_item.parent_is_last.len() {
                     if tree_item.parent_is_last[i] {
                         tree_parts.push("  "); // Ancestor was last child, no vertical line (2 spaces)
                     } else {
-                        tree_parts.push("│ "); // Ancestor has siblings below, show vertical line + space
+                        tree_parts.push(vertical_line); // Ancestor has siblings below
                     }
                 } else {
                     tree_parts.push("  "); // Default to 2 spaces
@@ -324,9 +337,9 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
             // Add connector for current level (with 1 space padding like diffnav)
             if tree_item.depth > 0 {
                 if tree_item.is_last_child {
-                    tree_parts.push("╰ "); // Final branch connector + space
+                    tree_parts.push(last_branch); // Final branch connector
                 } else {
-                    tree_parts.push("├ "); // Branch connector + space
+                    tree_parts.push(branch); // Branch connector
                 }
             }
 
@@ -343,13 +356,13 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
             // Add checkbox for files (not directories)
             if !tree_item.is_directory {
                 let is_checked = app.checked_files.contains(&tree_item.full_path);
-                let checkbox_char = if is_checked { '☑' } else { '☐' };
+                let checkbox = crate::icons::checkbox(is_checked, app.config.icon_mode);
                 let checkbox_style = if is_selected {
                     Style::default().fg(app.theme.colors.tree_selected_fg.0)
                 } else {
                     Style::default().fg(app.theme.colors.text_primary.0)
                 };
-                spans.push(Span::styled(format!("{checkbox_char} "), checkbox_style));
+                spans.push(Span::styled(checkbox, checkbox_style));
             }
 
             // Get icon based on item type
@@ -401,7 +414,13 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
 
             // Calculate available space for the name
             let tree_prefix_width = tree_prefix.chars().count();
-            let checkbox_width = if !tree_item.is_directory { 2 } else { 0 }; // Checkbox + space for files only
+            let checkbox_width = if !tree_item.is_directory {
+                crate::icons::checkbox(false, app.config.icon_mode)
+                    .chars()
+                    .count()
+            } else {
+                0
+            };
             let icon_width = 2; // Icon + space
             let stats_width = if tree_item.file_diff.is_some() { 10 } else { 0 }; // Rough estimate for stats
             let used_width = tree_prefix_width + checkbox_width + icon_width + stats_width;
@@ -574,7 +593,10 @@ pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
     let status_spans = if app.left_pane == LeftPane::History {
         if app.commit_index == 0 {
             vec![Span::styled(
-                " ● Working tree changes | Enter: open".to_string(),
+                format!(
+                    " {} Working tree changes | Enter: open",
+                    crate::icons::bullet(app.config.icon_mode)
+                ),
                 Style::default().fg(app.theme.colors.status_added.0),
             )]
         } else if let Some(commit) = app.commits.get(app.commit_index - 1) {
@@ -744,9 +766,13 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
         .unwrap_or(1);
     let gutter_width = max_line_number.to_string().len().max(3);
 
+    let gap_marker = match app.config.icon_mode {
+        crate::config::IconMode::Ascii => "---",
+        _ => "···",
+    };
     let gap_line = |hidden: usize| {
         Line::from(Span::styled(
-            format!("··· {hidden} lines hidden (x: full view) ···"),
+            format!("{gap_marker} {hidden} lines hidden (x: full view) {gap_marker}"),
             Style::default()
                 .fg(app.theme.colors.text_dim.0)
                 .add_modifier(Modifier::DIM),
@@ -811,7 +837,10 @@ fn side_line(row: &AlignedRow, old_side: bool, gutter_width: usize, app: &App) -
     let Some((number, text)) = side else {
         // Line only exists on the other side: keep the row for alignment
         return Line::from(Span::styled(
-            format!("{:>gutter_width$} ", "·"),
+            format!(
+                "{:>gutter_width$} ",
+                crate::icons::filler(app.config.icon_mode)
+            ),
             Style::default()
                 .fg(app.theme.colors.text_dim.0)
                 .add_modifier(Modifier::DIM),

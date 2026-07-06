@@ -24,6 +24,10 @@ pub struct Cli {
     #[arg(long, short = 'f')]
     pub flat: bool,
 
+    /// Icon set override (ascii recommended for plain xterm)
+    #[arg(long, value_enum)]
+    pub icons: Option<crate::config::IconMode>,
+
     /// Configuration file path
     #[arg(long, value_name = "FILE")]
     pub config: Option<String>,
@@ -184,6 +188,7 @@ mod tests {
             cached: false,
             worktree: false,
             flat: false,
+            icons: None,
             config: None,
             verbose: false,
         };
@@ -202,6 +207,7 @@ mod tests {
             cached: true,
             worktree: false,
             flat: false,
+            icons: None,
             config: None,
             verbose: false,
         };
@@ -220,6 +226,7 @@ mod tests {
             cached: false,
             worktree: false,
             flat: false,
+            icons: None,
             config: None,
             verbose: false,
         };
@@ -240,6 +247,7 @@ mod tests {
             cached: false,
             worktree: false,
             flat: false,
+            icons: None,
             config: None,
             verbose: false,
         };
@@ -258,6 +266,7 @@ mod tests {
             cached: false,
             worktree: false,
             flat: false,
+            icons: None,
             config: None,
             verbose: false,
         };

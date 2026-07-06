@@ -472,9 +472,10 @@ impl App {
     fn preview_history_entry(&mut self) {
         let executor = GitExecutor::new();
         let preview = if self.commit_index == 0 {
-            executor
-                .get_status_summary()
-                .map(|status| format!("● Working tree changes\n\n{status}\nEnter/click: open"))
+            let bullet = crate::icons::bullet(self.config.icon_mode);
+            executor.get_status_summary().map(|status| {
+                format!("{bullet} Working tree changes\n\n{status}\nEnter/click: open")
+            })
         } else {
             match self.commits.get(self.commit_index - 1) {
                 Some(commit) => executor
@@ -637,6 +638,46 @@ impl App {
         match self.left_pane {
             LeftPane::Files => self.select_previous(),
             LeftPane::History => self.history_move(-1),
+        }
+    }
+
+    /// Tab navigation wraps around at both ends of the list
+    fn nav_next_wrapping(&mut self) {
+        match self.left_pane {
+            LeftPane::Files => {
+                let len = self.get_current_file_tree_items().len();
+                if len > 0 && self.selected_index + 1 >= len {
+                    self.jump_to_top();
+                } else {
+                    self.select_next();
+                }
+            }
+            LeftPane::History => {
+                if self.commit_index + 1 >= self.history_len() {
+                    self.history_select(0);
+                } else {
+                    self.history_move(1);
+                }
+            }
+        }
+    }
+
+    fn nav_previous_wrapping(&mut self) {
+        match self.left_pane {
+            LeftPane::Files => {
+                if self.selected_index == 0 {
+                    self.jump_to_bottom();
+                } else {
+                    self.select_previous();
+                }
+            }
+            LeftPane::History => {
+                if self.commit_index == 0 {
+                    self.history_select(self.history_len().saturating_sub(1));
+                } else {
+                    self.history_move(-1);
+                }
+            }
         }
     }
 
@@ -1553,6 +1594,9 @@ fn main() -> Result<()> {
     if cli.flat {
         config.flat_file_list = true;
     }
+    if let Some(icon_mode) = cli.icons {
+        config.icon_mode = icon_mode;
+    }
 
     // Check if we need a git repository
     if operation_mode.requires_git_repo() && !GitExecutor::is_git_repo() {
@@ -1852,9 +1896,10 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                             }
                         }
 
-                        // Tab / Shift+Tab move through the left pane list
-                        KeyCode::Tab if !app.search_input_mode => app.nav_next(),
-                        KeyCode::BackTab if !app.search_input_mode => app.nav_previous(),
+                        // Tab / Shift+Tab move through the left pane list,
+                        // wrapping around at either end
+                        KeyCode::Tab if !app.search_input_mode => app.nav_next_wrapping(),
+                        KeyCode::BackTab if !app.search_input_mode => app.nav_previous_wrapping(),
 
                         // Handle character input in search input mode (must be after other char handlers)
                         KeyCode::Char(c) if app.search_input_mode => {

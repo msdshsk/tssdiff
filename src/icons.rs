@@ -6,7 +6,43 @@ pub fn file_icon(filename: &str, mode: IconMode) -> char {
     match mode {
         IconMode::Nerd => nerd_file_icon(filename),
         IconMode::Emoji => emoji_file_icon(filename),
-        IconMode::Ascii => '·',
+        IconMode::Ascii => '.',
+    }
+}
+
+/// Checkbox marker with trailing space. Pure ASCII in ascii mode;
+/// the ballot-box glyphs are East-Asian-ambiguous width and garble
+/// rendering on xterm-like terminals
+pub fn checkbox(checked: bool, mode: IconMode) -> &'static str {
+    match (mode, checked) {
+        (IconMode::Ascii, true) => "[x] ",
+        (IconMode::Ascii, false) => "[ ] ",
+        (_, true) => "☑ ",
+        (_, false) => "☐ ",
+    }
+}
+
+/// Bullet for the working-tree history entry
+pub fn bullet(mode: IconMode) -> char {
+    match mode {
+        IconMode::Ascii => '*',
+        _ => '●',
+    }
+}
+
+/// Tree drawing parts: (vertical line, last-child branch, branch)
+pub fn tree_parts(mode: IconMode) -> (&'static str, &'static str, &'static str) {
+    match mode {
+        IconMode::Ascii => ("| ", "`-", "|-"),
+        _ => ("│ ", "╰ ", "├ "),
+    }
+}
+
+/// Filler marker for side-by-side rows that exist on one side only
+pub fn filler(mode: IconMode) -> &'static str {
+    match mode {
+        IconMode::Ascii => ".",
+        _ => "·",
     }
 }
 
@@ -133,8 +169,19 @@ mod tests {
 
     #[test]
     fn test_ascii_icons() {
-        assert_eq!(file_icon("main.rs", IconMode::Ascii), '·');
+        assert_eq!(file_icon("main.rs", IconMode::Ascii), '.');
         assert_eq!(directory_icon(false, IconMode::Ascii), '+');
+    }
+
+    #[test]
+    fn test_ascii_symbols_are_pure_ascii() {
+        assert_eq!(checkbox(true, IconMode::Ascii), "[x] ");
+        assert_eq!(checkbox(false, IconMode::Ascii), "[ ] ");
+        assert!(checkbox(false, IconMode::Ascii).is_ascii());
+        assert_eq!(bullet(IconMode::Ascii), '*');
+        let (v, l, b) = tree_parts(IconMode::Ascii);
+        assert!(v.is_ascii() && l.is_ascii() && b.is_ascii());
+        assert!(filler(IconMode::Ascii).is_ascii());
     }
 
     #[test]
