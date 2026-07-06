@@ -27,7 +27,7 @@ impl PersistenceManager {
         let home_dir =
             dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
 
-        Ok(home_dir.join(".local/share/ftdv/checks"))
+        Ok(home_dir.join(".local/share/tssdiff/checks"))
     }
 
     fn get_check_file_path(&self, key: &DiffFileKey) -> PathBuf {

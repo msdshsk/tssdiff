@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "ftdv")]
-#[command(about = "A TUI diff pager inspired by diffnav")]
+#[command(name = "tssdiff")]
+#[command(about = "A read-only TUI diff viewer with history browsing and side-by-side panes")]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]

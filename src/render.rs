@@ -121,6 +121,66 @@ pub fn render_commit_list(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_stateful_widget(list, area, &mut app.commit_list_state);
 }
 
+pub fn render_commit_graph(f: &mut Frame, area: Rect, app: &mut App) {
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let selected = app.graph_selected_row();
+
+    // Keep the selected commit roughly centered
+    let max_scroll = app.graph_rows.len().saturating_sub(visible_height);
+    let scroll = selected
+        .map(|row| row.saturating_sub(visible_height / 2))
+        .unwrap_or(0)
+        .min(max_scroll);
+    app.graph_scroll = scroll;
+
+    let end = (scroll + visible_height).min(app.graph_rows.len());
+    let lines: Vec<Line> = app.graph_rows[scroll..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, row)| {
+            let is_selected = selected == Some(scroll + offset);
+            let mut spans = vec![Span::styled(
+                row.graph.clone(),
+                Style::default().fg(app.theme.colors.tree_line.0),
+            )];
+            if let Some(ref hash) = row.hash {
+                spans.push(Span::styled(
+                    format!("{hash} "),
+                    Style::default().fg(app.theme.colors.status_modified.0),
+                ));
+                if !row.refs.is_empty() {
+                    spans.push(Span::styled(
+                        format!("{} ", row.refs),
+                        Style::default().fg(app.theme.colors.border_focused.0),
+                    ));
+                }
+                spans.push(Span::styled(
+                    row.subject.clone(),
+                    if is_selected {
+                        Style::default().fg(app.theme.colors.tree_selected_fg.0)
+                    } else {
+                        Style::default().fg(app.theme.colors.text_primary.0)
+                    },
+                ));
+            }
+            let line = Line::from(spans);
+            if is_selected {
+                line.style(Style::default().bg(app.theme.colors.tree_selected_bg.0))
+            } else {
+                line
+            }
+        })
+        .collect();
+
+    let graph = Paragraph::new(Text::from(lines)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Graph - [click: select, again: open]")
+            .style(Style::default().fg(app.theme.colors.border.0)),
+    );
+    f.render_widget(graph, area);
+}
+
 pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
     let width = 60.min(area.width.saturating_sub(2));
     let height = 26.min(area.height.saturating_sub(2));

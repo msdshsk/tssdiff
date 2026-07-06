@@ -1,5 +1,5 @@
-# ftdv Configuration Example
-# Save this as ~/.config/ftdv/config.yaml
+# tssdiff Configuration Example
+# Save this as ~/.config/tssdiff/config.yaml
 
 # Show changed files as a flat full-path list instead of a tree
 # (same as the --flat / -f command line flag)

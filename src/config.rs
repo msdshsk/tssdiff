@@ -211,7 +211,7 @@ impl Config {
     fn config_path() -> Result<PathBuf> {
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
 
-        Ok(home_dir.join(".config").join("ftdv").join("config.yaml"))
+        Ok(home_dir.join(".config").join("tssdiff").join("config.yaml"))
     }
 }
 

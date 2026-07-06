@@ -12,13 +12,13 @@ mod tree;
 
 use crate::cli::{Cli, OperationMode};
 use crate::config::{Config, DiffCommandType};
-use crate::git::{CommitInfo, GitExecutor};
+use crate::git::{CommitInfo, GitExecutor, GraphRow};
 use crate::parser::{DiffFileKey, DiffParser, FileDiff};
 use crate::persistence::PersistenceManager;
 use crate::render::{
-    render_commit_list, render_diff_content, render_file_list, render_help_overlay,
-    render_menu_bar, render_search_box, render_side_by_side, render_status_line,
-    render_warning_bar,
+    render_commit_graph, render_commit_list, render_diff_content, render_file_list,
+    render_help_overlay, render_menu_bar, render_search_box, render_side_by_side,
+    render_status_line, render_warning_bar,
 };
 use crate::side_by_side::AlignedRow;
 use crate::theme::Theme;
@@ -77,6 +77,7 @@ struct UiRegions {
     menu_items: Vec<(Rect, MenuAction)>,
     left_column: Rect,
     list_area: Rect,
+    graph_area: Rect,
 }
 
 // Template variable values for command substitution
@@ -118,6 +119,8 @@ struct App {
     commits: Vec<CommitInfo>,     // Loaded lazily when History opens
     commit_index: usize,          // 0 = virtual working-tree entry, 1.. = commits
     commit_list_state: ListState, // For stateful commit list scrolling
+    graph_rows: Vec<GraphRow>,    // git log --graph rows for the graph pane
+    graph_scroll: usize,          // Scroll offset used by the last graph render
     show_help: bool,              // Help overlay visibility
     regions: UiRegions,           // Mouse hit-test regions from the last frame
 }
@@ -200,6 +203,8 @@ impl App {
                 state.select(Some(0));
                 state
             },
+            graph_rows: Vec::new(),
+            graph_scroll: 0,
             show_help: false,
             regions: UiRegions::default(),
         };
@@ -229,8 +234,22 @@ impl App {
                 }
             }
         }
+        if self.graph_rows.is_empty() {
+            self.graph_rows = GitExecutor::new().get_commit_graph(300).unwrap_or_default();
+        }
         self.left_pane = LeftPane::History;
         self.preview_history_entry();
+    }
+
+    /// Graph row belonging to the currently selected commit
+    fn graph_selected_row(&self) -> Option<usize> {
+        if self.commit_index == 0 {
+            return None;
+        }
+        let hash = &self.commits.get(self.commit_index - 1)?.hash;
+        self.graph_rows
+            .iter()
+            .position(|row| row.hash.as_deref() == Some(hash.as_str()))
     }
 
     fn show_files_pane(&mut self) {
@@ -416,8 +435,33 @@ impl App {
             return;
         }
 
+        if self.left_pane == LeftPane::History && self.regions.graph_area.contains(position) {
+            self.handle_graph_click(mouse.row);
+            return;
+        }
+
         if self.regions.list_area.contains(position) {
             self.handle_list_click(mouse.row);
+        }
+    }
+
+    /// Click on a graph row selects its commit; a second click opens it
+    fn handle_graph_click(&mut self, row: u16) {
+        let area = self.regions.graph_area;
+        if row <= area.y || row >= area.y + area.height.saturating_sub(1) {
+            return;
+        }
+        let index = self.graph_scroll + (row - area.y - 1) as usize;
+        let Some(hash) = self.graph_rows.get(index).and_then(|r| r.hash.clone()) else {
+            return;
+        };
+        let Some(position) = self.commits.iter().position(|c| c.hash == hash) else {
+            return;
+        };
+        if self.commit_index == position + 1 {
+            self.open_selected_history_entry();
+        } else {
+            self.history_select(position + 1);
         }
     }
 
@@ -463,7 +507,9 @@ impl App {
             x: mouse.column,
             y: mouse.row,
         };
-        if self.regions.left_column.contains(position) {
+        let over_graph =
+            self.left_pane == LeftPane::History && self.regions.graph_area.contains(position);
+        if self.regions.left_column.contains(position) || over_graph {
             if scroll_down {
                 self.nav_next();
             } else {
@@ -1288,7 +1334,9 @@ fn main() -> Result<()> {
         get_diffs_from_git(&operation_mode)?
     };
 
-    if file_diffs.is_empty() {
+    // A repository with no pending changes still opens, straight into the
+    // history browser; outside a repository there is nothing to show
+    if file_diffs.is_empty() && !GitExecutor::is_git_repo() {
         println!("No differences found.");
         return Ok(());
     }
@@ -1302,7 +1350,11 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let app = App::new(config, file_diffs, operation_mode)?;
+    let no_changes = file_diffs.is_empty();
+    let mut app = App::new(config, file_diffs, operation_mode)?;
+    if no_changes {
+        app.open_history();
+    }
     let res = run_app(&mut terminal, app);
 
     // Restore terminal
@@ -1574,10 +1626,22 @@ fn ui(f: &mut Frame, app: &mut App) {
         .split(main_chunks[1]);
 
     render_status_line(f, right_chunks[0], app);
-    if app.view_mode == ViewMode::SideBySide && app.aligned_rows.is_some() {
-        render_side_by_side(f, right_chunks[1], app);
+    if app.left_pane == LeftPane::History {
+        // History mode: commit graph beside the commit preview
+        let history_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(right_chunks[1]);
+        app.regions.graph_area = history_chunks[0];
+        render_commit_graph(f, history_chunks[0], app);
+        render_diff_content(f, history_chunks[1], app);
     } else {
-        render_diff_content(f, right_chunks[1], app);
+        app.regions.graph_area = Rect::default();
+        if app.view_mode == ViewMode::SideBySide && app.aligned_rows.is_some() {
+            render_side_by_side(f, right_chunks[1], app);
+        } else {
+            render_diff_content(f, right_chunks[1], app);
+        }
     }
 
     // Render warning bar below diff content if present.
@@ -1788,6 +1852,12 @@ mod tests {
             date: "2026-07-06 10:00".to_string(),
             subject: "test commit subject".to_string(),
         }];
+        app.graph_rows = vec![GraphRow {
+            graph: "* ".to_string(),
+            hash: Some("abc1234".to_string()),
+            refs: "(HEAD -> main)".to_string(),
+            subject: "test commit subject".to_string(),
+        }];
         app.left_pane = LeftPane::History;
         app.commit_index = 1;
         app.commit_list_state.select(Some(1));
@@ -1803,6 +1873,10 @@ mod tests {
         assert!(content.contains("test commit subject"));
         // Status line shows the selected commit's date
         assert!(content.contains("2026-07-06 10:00"));
+        // Graph pane renders beside the preview
+        assert!(content.contains("Graph"));
+        assert!(content.contains("(HEAD -> main)"));
+        assert!(content.contains("commit preview"));
     }
 
     #[test]

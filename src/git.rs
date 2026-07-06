@@ -15,6 +15,15 @@ pub struct CommitInfo {
     pub subject: String,
 }
 
+/// One text row of `git log --graph` output; edge-only rows have no commit
+#[derive(Debug, Clone)]
+pub struct GraphRow {
+    pub graph: String,
+    pub hash: Option<String>,
+    pub refs: String,
+    pub subject: String,
+}
+
 /// Git command executor for getting diff data
 pub struct GitExecutor;
 
@@ -354,6 +363,58 @@ impl GitExecutor {
             .collect())
     }
 
+    /// Commit graph rows for the history view, newest first
+    pub fn get_commit_graph(&self, limit: usize) -> Result<Vec<GraphRow>> {
+        Self::get_commit_graph_in(Path::new("."), limit)
+    }
+
+    fn get_commit_graph_in(dir: &Path, limit: usize) -> Result<Vec<GraphRow>> {
+        let output = Command::new("git")
+            .args([
+                "log",
+                "--graph",
+                "--color=never",
+                &format!("-n{limit}"),
+                "--pretty=format:%h%x09%d%x09%s",
+            ])
+            .current_dir(dir)
+            .output()
+            .context("Failed to execute git log --graph")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("git log --graph failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8(output.stdout).context("Git output is not valid UTF-8")?;
+        Ok(stdout
+            .lines()
+            .map(|line| match line.split_once('\t') {
+                // Commit row: "<graph> <hash>\t<refs>\t<subject>"
+                Some((left, rest)) => {
+                    let (graph, hash) = match left.rsplit_once(' ') {
+                        Some((graph, hash)) => (format!("{graph} "), hash.to_string()),
+                        None => (String::new(), left.to_string()),
+                    };
+                    let (refs, subject) = rest.split_once('\t').unwrap_or((rest, ""));
+                    GraphRow {
+                        graph,
+                        hash: Some(hash),
+                        refs: refs.trim().to_string(),
+                        subject: subject.to_string(),
+                    }
+                }
+                // Edge-only row like "|\" between commits
+                None => GraphRow {
+                    graph: line.to_string(),
+                    hash: None,
+                    refs: String::new(),
+                    subject: String::new(),
+                },
+            })
+            .collect())
+    }
+
     /// Commit header, message, and diffstat (no patch) for previews
     pub fn get_commit_summary(&self, commit: &str) -> Result<String> {
         let output = Command::new("git")
@@ -599,6 +660,14 @@ mod tests {
         assert_eq!(log[1].subject, "first commit");
         assert!(!log[0].hash.is_empty());
         assert!(log[0].date.contains('-'), "got date: {}", log[0].date);
+
+        let graph = GitExecutor::get_commit_graph_in(repo, 10).unwrap();
+        assert_eq!(graph.len(), 2);
+        assert!(graph[0].graph.contains('*'), "got: {}", graph[0].graph);
+        assert_eq!(graph[0].hash.as_deref(), Some(log[0].hash.as_str()));
+        assert_eq!(graph[0].subject, "second commit");
+        // HEAD decoration lands in refs, not the subject
+        assert!(graph[0].refs.contains("HEAD"), "got: {}", graph[0].refs);
     }
 
     #[test]

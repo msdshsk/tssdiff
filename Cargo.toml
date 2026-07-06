@@ -1,13 +1,12 @@
 [package]
-name = "ftdv"
+name = "tssdiff"
 version = "0.1.2"
 edition = "2024"
 rust-version = "1.85.0"
-description = "A terminal-based file tree diff viewer with flexible diff tool integration"
+description = "A read-only TUI diff viewer with history browsing and side-by-side panes (fork of ftdv)"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/wtnqk/ftdv"
-homepage = "https://github.com/wtnqk/ftdv"
-documentation = "https://docs.rs/ftdv"
+repository = "https://github.com/msdshsk/tssdiff"
+homepage = "https://github.com/msdshsk/tssdiff"
 readme = "README.md"
 keywords = ["diff", "git", "tui", "terminal", "viewer"]
 categories = ["command-line-utilities", "development-tools"]
@@ -40,7 +39,7 @@ similar = "3"
 [dev-dependencies]
 
 [[bin]]
-name = "ftdv"
+name = "tssdiff"
 path = "src/main.rs"
 
 [profile.release]
