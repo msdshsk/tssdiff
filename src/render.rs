@@ -1,4 +1,4 @@
-use crate::side_by_side::{AlignedRow, RowKind};
+use crate::side_by_side::{AlignedRow, DisplayRow, RowKind};
 use crate::{App, LeftPane, MenuAction};
 use ansi_to_tui::IntoText;
 use ratatui::{
@@ -248,6 +248,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         Line::default(),
         section(" View"),
         entry("v", "side-by-side <-> unified diff"),
+        entry("x", "condensed (hunks) <-> full file"),
         entry("e/y, d/u, f/b", "scroll diff 1 / 10 / 20 lines"),
         entry("PgDn / PgUp", "scroll diff 10 lines"),
         entry("h/l, H/L", "scroll horizontally 5 / 20 cols"),
@@ -264,7 +265,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         section(" Mouse"),
         entry("click", "select entry / menu, click again: open"),
         entry("wheel", "scroll list or diff"),
-        entry("Shift+wheel", "scroll horizontally (also tilt wheel)"),
+        entry("Alt+wheel", "scroll horizontally (tilt/Shift if forwarded)"),
         Line::default(),
         entry("q", "quit"),
         entry("?", "toggle this help"),
@@ -716,17 +717,22 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
     let Some(rows) = app.aligned_rows.take() else {
         return;
     };
+    let display: Vec<DisplayRow> = if app.display_rows.is_empty() && !rows.is_empty() {
+        // Defensive: a full mapping when no display order was prepared
+        (0..rows.len()).map(DisplayRow::Row).collect()
+    } else {
+        std::mem::take(&mut app.display_rows)
+    };
 
-    // Clamp scrolling to the aligned content
+    // Clamp scrolling to the displayed content
     let visible_height = area.height.saturating_sub(2) as usize;
-    let max_vertical = rows.len().saturating_sub(visible_height) as u16;
+    let max_vertical = display.len().saturating_sub(visible_height) as u16;
     app.vertical_scroll = app.vertical_scroll.min(max_vertical);
 
     let start = app.vertical_scroll as usize;
-    let end = (start + visible_height).min(rows.len());
-    let visible = &rows[start..end];
+    let end = (start + visible_height).min(display.len());
 
-    // Line number gutter sized for the largest visible line number
+    // Line number gutter sized for the largest line number
     let max_line_number = rows
         .iter()
         .flat_map(|row| [row.old.as_ref(), row.new.as_ref()])
@@ -736,20 +742,41 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
         .unwrap_or(1);
     let gutter_width = max_line_number.to_string().len().max(3);
 
-    let old_lines: Vec<Line> = visible
-        .iter()
-        .map(|row| side_line(row, true, gutter_width, app))
-        .collect();
-    let new_lines: Vec<Line> = visible
-        .iter()
-        .map(|row| side_line(row, false, gutter_width, app))
-        .collect();
+    let gap_line = |hidden: usize| {
+        Line::from(Span::styled(
+            format!("··· {hidden} lines hidden (x: full view) ···"),
+            Style::default()
+                .fg(app.theme.colors.text_dim.0)
+                .add_modifier(Modifier::DIM),
+        ))
+    };
+
+    let mut old_lines: Vec<Line> = Vec::with_capacity(end - start);
+    let mut new_lines: Vec<Line> = Vec::with_capacity(end - start);
+    for entry in &display[start..end] {
+        match entry {
+            DisplayRow::Row(index) => {
+                let row = &rows[*index];
+                old_lines.push(side_line(row, true, gutter_width, app));
+                new_lines.push(side_line(row, false, gutter_width, app));
+            }
+            DisplayRow::Gap { hidden } => {
+                old_lines.push(gap_line(*hidden));
+                new_lines.push(gap_line(*hidden));
+            }
+        }
+    }
 
     let panes = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
+    let after_title = if app.condensed {
+        " After - [v: unified, x: full view]"
+    } else {
+        " After - [v: unified, x: condensed]"
+    };
     let border_style = Style::default().fg(app.theme.colors.border.0);
     let before = Paragraph::new(Text::from(old_lines))
         .block(
@@ -763,7 +790,7 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" After - [v: unified view]")
+                .title(after_title)
                 .style(border_style),
         )
         .scroll((0, app.horizontal_scroll));
@@ -772,6 +799,7 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(after, panes[1]);
 
     app.aligned_rows = Some(rows);
+    app.display_rows = display;
 }
 
 /// One display line for the old (before) or new (after) pane

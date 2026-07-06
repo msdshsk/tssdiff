@@ -47,6 +47,12 @@ use std::process::{Command, Stdio};
 const DEFAULT_TERMINAL_HEIGHT: &str = "50";
 const DEFAULT_TERMINAL_TYPE: &str = "xterm-256color";
 
+/// Context lines kept around each change in the condensed view
+const CONDENSED_CONTEXT: usize = 3;
+/// Full-view highlighting stops after this many lines to keep
+/// file-to-file navigation responsive on huge files
+const HIGHLIGHT_FULL_VIEW_CAP: usize = 4000;
+
 /// How the diff pane presents a file's changes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
@@ -116,6 +122,8 @@ struct App {
     warning_message: Option<String>, // Warning to display in the warning bar below the diff pane
     view_mode: ViewMode,
     aligned_rows: Option<Vec<AlignedRow>>, // Before/after rows for the current file
+    display_rows: Vec<side_by_side::DisplayRow>, // Condensed (or full) row order to draw
+    condensed: bool,                       // Hunks-only view vs full file
     highlighted: Option<(HighlightedLines, HighlightedLines)>, // Syntax colors per side
     // Commit history browsing
     left_pane: LeftPane,
@@ -167,6 +175,8 @@ impl App {
             None
         };
 
+        let config_condensed = config.condensed_view;
+
         // Load existing check states
         let diff_keys: Vec<DiffFileKey> = file_diffs
             .iter()
@@ -204,6 +214,8 @@ impl App {
             warning_message: None,
             view_mode: ViewMode::SideBySide,
             aligned_rows: None,
+            display_rows: Vec::new(),
+            condensed: config_condensed,
             highlighted: None,
             left_pane: LeftPane::Files,
             commits: Vec::new(),
@@ -535,6 +547,7 @@ impl App {
     /// Recompute the before/after rows for the currently selected file
     fn refresh_aligned_rows(&mut self) {
         self.aligned_rows = None;
+        self.display_rows.clear();
         self.highlighted = None;
         if self.view_mode != ViewMode::SideBySide {
             return;
@@ -554,16 +567,37 @@ impl App {
         if let Ok((old_text, new_text)) =
             executor.get_file_versions(&self.operation_mode, &file_diff)
         {
-            self.aligned_rows = Some(side_by_side::align(&old_text, &new_text));
+            let rows = side_by_side::align(&old_text, &new_text);
+            self.display_rows = if self.condensed {
+                side_by_side::condense(&rows, CONDENSED_CONTEXT)
+            } else {
+                (0..rows.len()).map(side_by_side::DisplayRow::Row).collect()
+            };
+
             if self.config.syntax_highlight {
+                // Highlighting must run from the file start, so cap it at
+                // the last line the view can actually show
+                let cap = if self.condensed {
+                    side_by_side::max_needed_line(&rows, &self.display_rows)
+                } else {
+                    HIGHLIGHT_FULL_VIEW_CAP
+                };
                 self.highlighted = highlight::highlight_pair(
                     &file_diff.filename,
                     &old_text,
                     &new_text,
                     &self.config.syntax_theme,
+                    Some(cap),
                 );
             }
+            self.aligned_rows = Some(rows);
         }
+    }
+
+    fn toggle_condensed(&mut self) {
+        self.condensed = !self.condensed;
+        self.vertical_scroll = 0;
+        self.refresh_aligned_rows();
     }
 
     /// Route navigation keys to whichever list the left pane shows
@@ -1840,6 +1874,9 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                         // Toggle between side-by-side and unified diff view
                         KeyCode::Char('v') if !app.search_input_mode => app.toggle_view_mode(),
 
+                        // Toggle condensed (hunks-only) vs full file view
+                        KeyCode::Char('x') if !app.search_input_mode => app.toggle_condensed(),
+
                         // Jump navigation (disabled only when typing in search)
                         KeyCode::Char('g') if !app.search_input_mode => app.nav_first(),
                         KeyCode::Char('G') if !app.search_input_mode => app.nav_last(),
@@ -1889,8 +1926,13 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                 Event::Mouse(mouse) => match mouse.kind {
                     MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                         let down = mouse.kind == MouseEventKind::ScrollDown;
-                        if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                            // Shift+wheel scrolls the diff pane horizontally
+                        // Alt+wheel (or Shift+wheel where the terminal forwards
+                        // it - Windows Terminal reserves Shift for selection)
+                        // scrolls the diff pane horizontally
+                        if mouse
+                            .modifiers
+                            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                        {
                             if down {
                                 app.scroll_right(5);
                             } else {
@@ -2149,6 +2191,37 @@ mod tests {
         assert!(content.contains("old line"));
         assert!(content.contains("new line"));
         assert!(content.contains("same"));
+    }
+
+    #[test]
+    fn test_render_condensed_gap() {
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let config = Config::default();
+        let mut app = App::new(
+            config,
+            vec![],
+            OperationMode::Compare {
+                target1: "a".to_string(),
+                target2: "b".to_string(),
+            },
+        )
+        .unwrap();
+
+        // 30 identical lines with one change at the end
+        let old: String = (1..=30).map(|i| format!("line{i}\n")).collect();
+        let new = old.replace("line30\n", "changed30\n");
+        let rows = side_by_side::align(&old, &new);
+        app.display_rows = side_by_side::condense(&rows, 3);
+        app.aligned_rows = Some(rows);
+
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(content.contains("lines hidden"), "got: {content}");
+        assert!(content.contains("changed30"));
+        // Collapsed lines from the top of the file are not rendered
+        assert!(!content.contains("line1 "));
     }
 
     #[test]

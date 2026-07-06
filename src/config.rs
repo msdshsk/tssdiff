@@ -130,8 +130,17 @@ pub struct Config {
     #[serde(default = "default_syntax_theme")]
     pub syntax_theme: String,
 
+    /// Show only changed hunks with context in the side-by-side view
+    /// (x key toggles at runtime)
+    #[serde(default = "default_condensed_view")]
+    pub condensed_view: bool,
+
     #[serde(default)]
     pub theme: Theme,
+}
+
+fn default_condensed_view() -> bool {
+    true
 }
 
 fn default_syntax_highlight() -> bool {
@@ -152,6 +161,7 @@ impl Default for Config {
             editor: String::new(),
             syntax_highlight: default_syntax_highlight(),
             syntax_theme: default_syntax_theme(),
+            condensed_view: default_condensed_view(),
             theme: Theme::default(),
         }
     }

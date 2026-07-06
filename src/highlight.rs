@@ -54,27 +54,37 @@ fn resolve_theme(theme_name: &str) -> Option<&'static Theme> {
 }
 
 /// Syntax-highlight both versions of a file. None when the language is
-/// unknown, letting the caller fall back to plain row coloring
+/// unknown, letting the caller fall back to plain row coloring.
+/// `max_lines` caps how far highlighting runs (state is per-line from
+/// the file start, so a cap directly bounds the cost); lines past the
+/// cap simply render unhighlighted
 pub fn highlight_pair(
     filename: &str,
     old_text: &str,
     new_text: &str,
     theme_name: &str,
+    max_lines: Option<usize>,
 ) -> Option<(HighlightedLines, HighlightedLines)> {
     let syntax = find_syntax(filename, new_text)?;
     let theme = resolve_theme(theme_name)?;
 
     Some((
-        highlight_text(old_text, syntax, theme),
-        highlight_text(new_text, syntax, theme),
+        highlight_text(old_text, syntax, theme, max_lines),
+        highlight_text(new_text, syntax, theme, max_lines),
     ))
 }
 
-fn highlight_text(text: &str, syntax: &SyntaxReference, theme: &Theme) -> HighlightedLines {
+fn highlight_text(
+    text: &str,
+    syntax: &SyntaxReference,
+    theme: &Theme,
+    max_lines: Option<usize>,
+) -> HighlightedLines {
     let set = syntax_set();
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     LinesWithEndings::from(text)
+        .take(max_lines.unwrap_or(usize::MAX))
         .map(|line| {
             match highlighter.highlight_line(line, set) {
                 Ok(segments) => segments
@@ -112,7 +122,7 @@ mod tests {
         let new_text = "fn main() {\n    println!(\"hi\");\n}\n";
 
         let (old_hl, new_hl) =
-            highlight_pair("src/main.rs", old_text, new_text, DEFAULT_THEME).unwrap();
+            highlight_pair("src/main.rs", old_text, new_text, DEFAULT_THEME, None).unwrap();
 
         assert_eq!(old_hl.len(), 1);
         assert_eq!(new_hl.len(), 3);
@@ -125,17 +135,20 @@ mod tests {
 
     #[test]
     fn test_unknown_extension_returns_none() {
-        assert!(highlight_pair("data.zzz_unknown", "a\n", "b\n", DEFAULT_THEME).is_none());
+        assert!(highlight_pair("data.zzz_unknown", "a\n", "b\n", DEFAULT_THEME, None).is_none());
     }
 
     #[test]
     fn test_unknown_theme_falls_back() {
-        assert!(highlight_pair("a.rs", "fn x() {}\n", "fn y() {}\n", "no-such-theme").is_some());
+        assert!(
+            highlight_pair("a.rs", "fn x() {}\n", "fn y() {}\n", "no-such-theme", None).is_some()
+        );
     }
 
     #[test]
     fn test_empty_text_highlights_to_empty() {
-        let (old_hl, new_hl) = highlight_pair("a.rs", "", "fn a() {}\n", DEFAULT_THEME).unwrap();
+        let (old_hl, new_hl) =
+            highlight_pair("a.rs", "", "fn a() {}\n", DEFAULT_THEME, None).unwrap();
         assert!(old_hl.is_empty());
         assert_eq!(new_hl.len(), 1);
     }

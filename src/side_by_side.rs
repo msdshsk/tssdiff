@@ -95,6 +95,71 @@ fn clean(line: &str) -> String {
     line.trim_end_matches('\r').to_string()
 }
 
+/// One row of the condensed display: an aligned row by index, or a
+/// collapsed run of unchanged lines
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayRow {
+    Row(usize),
+    Gap { hidden: usize },
+}
+
+/// Keep rows within `context` lines of a change and collapse longer
+/// unchanged runs into gaps. Files without changes stay complete
+pub fn condense(rows: &[AlignedRow], context: usize) -> Vec<DisplayRow> {
+    if rows.iter().all(|row| row.kind == RowKind::Context) {
+        return (0..rows.len()).map(DisplayRow::Row).collect();
+    }
+
+    let mut keep = vec![false; rows.len()];
+    for (i, row) in rows.iter().enumerate() {
+        if row.kind != RowKind::Context {
+            let start = i.saturating_sub(context);
+            let end = (i + context + 1).min(rows.len());
+            keep[start..end].fill(true);
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        if keep[i] {
+            result.push(DisplayRow::Row(i));
+            i += 1;
+        } else {
+            let start = i;
+            while i < rows.len() && !keep[i] {
+                i += 1;
+            }
+            let hidden = i - start;
+            if hidden <= 2 {
+                // Not worth a separator for a couple of lines
+                for row in start..i {
+                    result.push(DisplayRow::Row(row));
+                }
+            } else {
+                result.push(DisplayRow::Gap { hidden });
+            }
+        }
+    }
+    result
+}
+
+/// Highest line number needed to render the given display rows, used to
+/// cap how far syntax highlighting has to run
+pub fn max_needed_line(rows: &[AlignedRow], display: &[DisplayRow]) -> usize {
+    display
+        .iter()
+        .filter_map(|entry| match entry {
+            DisplayRow::Row(index) => rows.get(*index),
+            DisplayRow::Gap { .. } => None,
+        })
+        .flat_map(|row| [row.old.as_ref(), row.new.as_ref()])
+        .flatten()
+        .map(|(number, _)| *number)
+        .max()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +228,46 @@ mod tests {
         let rows = align("a\r\n", "b\r\n");
         assert_eq!(rows[0].old, Some((1, "a".to_string())));
         assert_eq!(rows[0].new, Some((1, "b".to_string())));
+    }
+
+    #[test]
+    fn test_condense_collapses_long_context_runs() {
+        // 20 identical lines, one change in the middle
+        let old: String = (1..=20).map(|i| format!("line{i}\n")).collect();
+        let new = old.replace("line10\n", "changed\n");
+        let rows = align(&old, &new);
+
+        let display = condense(&rows, 3);
+
+        // Gaps at both ends, kept rows around the change
+        assert!(matches!(display.first(), Some(DisplayRow::Gap { hidden }) if *hidden > 0));
+        assert!(matches!(display.last(), Some(DisplayRow::Gap { hidden }) if *hidden > 0));
+        let kept = display
+            .iter()
+            .filter(|entry| matches!(entry, DisplayRow::Row(_)))
+            .count();
+        // 1 changed row + 3 context on each side
+        assert_eq!(kept, 7);
+
+        // Highlight cap covers the last kept line, not the whole file
+        let needed = max_needed_line(&rows, &display);
+        assert_eq!(needed, 13);
+    }
+
+    #[test]
+    fn test_condense_keeps_unchanged_file_complete() {
+        let rows = align("a\nb\nc\n", "a\nb\nc\n");
+        let display = condense(&rows, 3);
+        assert_eq!(display.len(), 3);
+        assert!(display.iter().all(|e| matches!(e, DisplayRow::Row(_))));
+    }
+
+    #[test]
+    fn test_condense_keeps_short_gaps_inline() {
+        // Changes separated by only two unchanged lines stay contiguous
+        let rows = align("X\na\nb\nY\n", "Z\na\nb\nW\n");
+        let display = condense(&rows, 0);
+        assert!(display.iter().all(|e| matches!(e, DisplayRow::Row(_))));
+        assert_eq!(display.len(), 4);
     }
 }
