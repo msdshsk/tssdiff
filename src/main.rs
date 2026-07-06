@@ -26,8 +26,8 @@ use crate::tree::{FileTreeBuilder, FileTreeItem};
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-        MouseEvent, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -1874,8 +1874,22 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                     }
                 }
                 Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollDown => app.handle_mouse_scroll(mouse, true),
-                    MouseEventKind::ScrollUp => app.handle_mouse_scroll(mouse, false),
+                    MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                        let down = mouse.kind == MouseEventKind::ScrollDown;
+                        if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                            // Shift+wheel scrolls the diff pane horizontally
+                            if down {
+                                app.scroll_right(5);
+                            } else {
+                                app.scroll_left(5);
+                            }
+                        } else {
+                            app.handle_mouse_scroll(mouse, down);
+                        }
+                    }
+                    // Tilt wheel
+                    MouseEventKind::ScrollRight => app.scroll_right(5),
+                    MouseEventKind::ScrollLeft => app.scroll_left(5),
                     MouseEventKind::Down(MouseButton::Left) => app.handle_mouse_click(mouse),
                     _ => {}
                 },

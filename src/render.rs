@@ -264,6 +264,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         section(" Mouse"),
         entry("click", "select entry / menu, click again: open"),
         entry("wheel", "scroll list or diff"),
+        entry("Shift+wheel", "scroll horizontally (also tilt wheel)"),
         Line::default(),
         entry("q", "quit"),
         entry("?", "toggle this help"),
