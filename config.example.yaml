@@ -5,6 +5,14 @@
 # (same as the --flat / -f command line flag)
 flat_file_list: false
 
+# Icon set: emoji (default, works everywhere), nerd (needs a Nerd Font
+# terminal font), or ascii
+icon_mode: emoji
+
+# Editor command for the 'o' key (e.g. "code", "nvim", "notepad").
+# Empty falls back to $EDITOR, then the OS default application
+editor: ''
+
 # The diff pane defaults to built-in side-by-side before/after panes
 # (no external tools needed). Press 'v' in the app to switch to the
 # unified view, where the external tools configured below apply.

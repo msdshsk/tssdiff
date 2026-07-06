@@ -181,9 +181,35 @@ pub fn render_commit_graph(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(graph, area);
 }
 
+pub fn render_commit_input(f: &mut Frame, area: Rect, app: &App) {
+    let width = 64.min(area.width.saturating_sub(4));
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(3) / 2,
+        width,
+        height: 3,
+    };
+
+    f.render_widget(Clear, popup);
+    let input = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!(" {}", app.commit_message),
+            Style::default().fg(app.theme.colors.text_primary.0),
+        ),
+        Span::styled("▏", Style::default().fg(app.theme.colors.border_focused.0)),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Commit message (Enter: commit, Esc: cancel)")
+            .style(Style::default().fg(app.theme.colors.border_focused.0)),
+    );
+    f.render_widget(input, popup);
+}
+
 pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
     let width = 60.min(area.width.saturating_sub(2));
-    let height = 26.min(area.height.saturating_sub(2));
+    let height = 30.min(area.height.saturating_sub(2));
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -229,6 +255,10 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         section(" Files"),
         entry("/", "filter file list"),
         entry("Tab", "mark file as reviewed"),
+        entry("s / S", "stage / unstage checked files"),
+        entry("C", "commit staged changes"),
+        entry("o", "open file in editor"),
+        entry("r", "reload diffs"),
         entry("Space", "refresh diff view"),
         Line::default(),
         section(" Mouse"),
@@ -320,14 +350,14 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
 
             // Get icon based on item type
             let icon = if tree_item.is_directory {
-                crate::icons::get_directory_icon(tree_item.is_expanded)
+                crate::icons::directory_icon(tree_item.is_expanded, app.config.icon_mode)
             } else {
                 // File - use file_diff icon or default
                 tree_item
                     .file_diff
                     .as_ref()
-                    .map(|fd| fd.get_file_icon())
-                    .unwrap_or(crate::icons::get_file_icon(""))
+                    .map(|fd| fd.get_file_icon(app.config.icon_mode))
+                    .unwrap_or(crate::icons::file_icon("", app.config.icon_mode))
             };
 
             // Apply color to directory icon
@@ -348,15 +378,20 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
             } else if tree_item.is_directory {
                 Style::default().fg(app.theme.colors.tree_directory.0)
             } else {
-                // Check if file is checked to dim the color
+                // Staged files show green; checked (reviewed) files dim
+                let is_staged = app.staged_files.contains(&tree_item.full_path);
+                let base_color = if is_staged {
+                    app.theme.colors.status_added.0
+                } else {
+                    app.theme.colors.tree_file.0
+                };
                 let is_checked = app.checked_files.contains(&tree_item.full_path);
                 if is_checked {
-                    // Dim the file color for checked files
                     Style::default()
-                        .fg(app.theme.colors.tree_file.0)
+                        .fg(base_color)
                         .add_modifier(ratatui::style::Modifier::DIM)
                 } else {
-                    Style::default().fg(app.theme.colors.tree_file.0)
+                    Style::default().fg(base_color)
                 }
             };
 
@@ -564,7 +599,10 @@ pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
             ));
             spans.push(Span::raw(" | Directory | "));
         } else if let Some(file_diff) = &tree_item.file_diff {
-            spans.push(Span::raw(format!(" {}: ", file_diff.get_file_icon())));
+            spans.push(Span::raw(format!(
+                " {}: ",
+                file_diff.get_file_icon(app.config.icon_mode)
+            )));
             spans.push(Span::styled(
                 tree_item.full_path.clone(),
                 Style::default().fg(app.theme.colors.tree_file.0),
@@ -593,6 +631,12 @@ pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
                 }
             }
             spans.push(Span::raw(" | "));
+            if app.staged_files.contains(&tree_item.full_path) {
+                spans.push(Span::styled(
+                    "staged | ".to_string(),
+                    Style::default().fg(app.theme.colors.status_added.0),
+                ));
+            }
         } else {
             spans.push(Span::raw(format!(
                 " : {} | No diff | ",

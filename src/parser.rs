@@ -19,8 +19,8 @@ pub struct DiffFileKey {
 }
 
 impl FileDiff {
-    /// Get appropriate nerd font icon based on file extension
-    pub fn get_file_icon(&self) -> char {
+    /// Get the file's icon in the configured icon set
+    pub fn get_file_icon(&self, mode: crate::config::IconMode) -> char {
         let filename = if self.filename.contains('/') {
             self.filename
                 .split('/')
@@ -30,7 +30,7 @@ impl FileDiff {
             &self.filename
         };
 
-        crate::icons::get_file_icon(filename)
+        crate::icons::file_icon(filename, mode)
     }
 
     /// Get diff statistics as string with icons

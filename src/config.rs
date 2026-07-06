@@ -113,8 +113,28 @@ pub struct Config {
     #[serde(default)]
     pub flat_file_list: bool,
 
+    /// Icon set used in the file tree
+    #[serde(default)]
+    pub icon_mode: IconMode,
+
+    /// Editor command for opening files (o key). Empty uses $EDITOR,
+    /// then the OS default application
+    #[serde(default)]
+    pub editor: String,
+
     #[serde(default)]
     pub theme: Theme,
+}
+
+/// Icon set for the file tree. Nerd requires a Nerd Font patched
+/// terminal font; Emoji renders everywhere via font fallback
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IconMode {
+    Nerd,
+    #[default]
+    Emoji,
+    Ascii,
 }
 
 impl Config {

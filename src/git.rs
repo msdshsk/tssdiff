@@ -45,7 +45,11 @@ impl GitExecutor {
     pub fn get_diff(&self, mode: &OperationMode) -> Result<String> {
         match mode {
             OperationMode::GitWorkingDirectory | OperationMode::GitStatus => {
-                let mut diff = self.execute_git_diff(&["diff"])?;
+                // Diff against HEAD so staged files stay visible while
+                // reviewing; fall back for repositories without commits
+                let mut diff = self
+                    .execute_git_diff(&["diff", "HEAD"])
+                    .or_else(|_| self.execute_git_diff(&["diff"]))?;
                 diff.push_str(&self.untracked_files_diff()?);
                 Ok(diff)
             }
@@ -112,7 +116,9 @@ impl GitExecutor {
     pub fn get_file_diff(&self, mode: &OperationMode, file_path: &str) -> Result<String> {
         match mode {
             OperationMode::GitWorkingDirectory | OperationMode::GitStatus => {
-                let diff = self.execute_git_diff(&["diff", "--", file_path])?;
+                let diff = self
+                    .execute_git_diff(&["diff", "HEAD", "--", file_path])
+                    .or_else(|_| self.execute_git_diff(&["diff", "--", file_path]))?;
                 if diff.is_empty() {
                     // Untracked files produce no output from `git diff`
                     self.untracked_file_diff(file_path)
@@ -236,7 +242,8 @@ impl GitExecutor {
 
         match mode {
             OperationMode::GitWorkingDirectory | OperationMode::GitStatus => Ok((
-                self.blob_for_side(old_rel, ":")?,
+                // HEAD side matches the HEAD-based working tree diff
+                self.blob_for_side(old_rel, "HEAD:")?,
                 Self::worktree_for_side(new_rel)?,
             )),
             OperationMode::GitCached => Ok((
@@ -436,6 +443,98 @@ impl GitExecutor {
         String::from_utf8(output.stdout).context("Git output is not valid UTF-8")
     }
 
+    /// Files currently staged, repo-root relative
+    pub fn staged_files(&self) -> Result<std::collections::HashSet<String>> {
+        Self::staged_files_in(&Self::toplevel()?)
+    }
+
+    fn staged_files_in(repo_root: &Path) -> Result<std::collections::HashSet<String>> {
+        let output = Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(repo_root)
+            .output()
+            .context("Failed to list staged files")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("git diff --cached failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8(output.stdout).context("Git output is not valid UTF-8")?;
+        Ok(stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_string())
+            .collect())
+    }
+
+    /// Stage the given repo-root-relative paths
+    pub fn stage_files(&self, paths: &[String]) -> Result<()> {
+        Self::stage_files_in(&Self::toplevel()?, paths)
+    }
+
+    fn stage_files_in(repo_root: &Path, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let output = Command::new("git")
+            .args(["add", "--"])
+            .args(paths)
+            .current_dir(repo_root)
+            .output()
+            .context("Failed to execute git add")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("git add failed: {}", stderr));
+        }
+        Ok(())
+    }
+
+    /// Unstage the given repo-root-relative paths
+    pub fn unstage_files(&self, paths: &[String]) -> Result<()> {
+        Self::unstage_files_in(&Self::toplevel()?, paths)
+    }
+
+    fn unstage_files_in(repo_root: &Path, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let output = Command::new("git")
+            .args(["restore", "--staged", "--"])
+            .args(paths)
+            .current_dir(repo_root)
+            .output()
+            .context("Failed to execute git restore --staged")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("git restore --staged failed: {}", stderr));
+        }
+        Ok(())
+    }
+
+    /// Commit staged changes; returns git's summary output
+    pub fn commit(&self, message: &str) -> Result<String> {
+        Self::commit_in(&Self::toplevel()?, message)
+    }
+
+    fn commit_in(repo_root: &Path, message: &str) -> Result<String> {
+        let output = Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(repo_root)
+            .output()
+            .context("Failed to execute git commit")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(anyhow!("git commit failed: {}{}", stdout, stderr));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
     /// Short working-tree status for the history preview
     pub fn get_status_summary(&self) -> Result<String> {
         let output = Command::new("git")
@@ -469,7 +568,7 @@ impl GitExecutor {
     }
 
     /// Repository root of the current working directory
-    fn toplevel() -> Result<PathBuf> {
+    pub fn toplevel() -> Result<PathBuf> {
         let output = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
             .output()
@@ -668,6 +767,45 @@ mod tests {
         assert_eq!(graph[0].subject, "second commit");
         // HEAD decoration lands in refs, not the subject
         assert!(graph[0].refs.contains("HEAD"), "got: {}", graph[0].refs);
+    }
+
+    #[test]
+    fn test_stage_unstage_commit_flow() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@t"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "initial"]);
+
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "brand new\n").unwrap();
+
+        assert!(GitExecutor::staged_files_in(repo).unwrap().is_empty());
+
+        let paths = vec!["a.txt".to_string(), "new.txt".to_string()];
+        GitExecutor::stage_files_in(repo, &paths).unwrap();
+        let staged = GitExecutor::staged_files_in(repo).unwrap();
+        assert!(staged.contains("a.txt") && staged.contains("new.txt"));
+
+        GitExecutor::unstage_files_in(repo, &["new.txt".to_string()]).unwrap();
+        let staged = GitExecutor::staged_files_in(repo).unwrap();
+        assert!(staged.contains("a.txt") && !staged.contains("new.txt"));
+
+        GitExecutor::commit_in(repo, "stage flow commit").unwrap();
+        assert!(GitExecutor::staged_files_in(repo).unwrap().is_empty());
+        let log = GitExecutor::get_commit_log_in(repo, 5).unwrap();
+        assert_eq!(log[0].subject, "stage flow commit");
     }
 
     #[test]

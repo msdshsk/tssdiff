@@ -16,8 +16,8 @@ use crate::git::{CommitInfo, GitExecutor, GraphRow};
 use crate::parser::{DiffFileKey, DiffParser, FileDiff};
 use crate::persistence::PersistenceManager;
 use crate::render::{
-    render_commit_graph, render_commit_list, render_diff_content, render_file_list,
-    render_help_overlay, render_menu_bar, render_search_box, render_side_by_side,
+    render_commit_graph, render_commit_input, render_commit_list, render_diff_content,
+    render_file_list, render_help_overlay, render_menu_bar, render_search_box, render_side_by_side,
     render_status_line, render_warning_bar,
 };
 use crate::side_by_side::AlignedRow;
@@ -123,6 +123,12 @@ struct App {
     graph_scroll: usize,          // Scroll offset used by the last graph render
     show_help: bool,              // Help overlay visibility
     regions: UiRegions,           // Mouse hit-test regions from the last frame
+    // Staging and live refresh
+    staged_files: std::collections::HashSet<String>, // Repo-root-relative staged paths
+    commit_input_mode: bool,                         // Commit message box visibility
+    commit_message: String,                          // Commit message being typed
+    last_refresh_check: std::time::Instant,          // Auto-refresh timer
+    last_worktree_diff: Option<String>,              // Raw diff snapshot for change detection
 }
 
 impl App {
@@ -207,9 +213,182 @@ impl App {
             graph_scroll: 0,
             show_help: false,
             regions: UiRegions::default(),
+            staged_files: std::collections::HashSet::new(),
+            commit_input_mode: false,
+            commit_message: String::new(),
+            last_refresh_check: std::time::Instant::now(),
+            last_worktree_diff: None,
         };
         app.refresh_aligned_rows();
+        app.refresh_staged_files();
         Ok(app)
+    }
+
+    fn is_working_tree_mode(&self) -> bool {
+        matches!(
+            self.operation_mode,
+            OperationMode::GitWorkingDirectory | OperationMode::GitStatus
+        )
+    }
+
+    fn refresh_staged_files(&mut self) {
+        self.staged_files = if self.is_working_tree_mode() {
+            GitExecutor::new().staged_files().unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
+    }
+
+    /// Checked files that exist in the current list, for staging operations
+    fn checked_paths(&self) -> Vec<String> {
+        self.file_tree_items
+            .iter()
+            .filter(|item| !item.is_directory && self.checked_files.contains(&item.full_path))
+            .map(|item| item.full_path.clone())
+            .collect()
+    }
+
+    /// Stage (s) or unstage (S) every checked file
+    fn stage_checked_files(&mut self, stage: bool) {
+        if !self.is_working_tree_mode() {
+            self.warning_message = Some("Staging works in the working tree view".to_string());
+            return;
+        }
+        let paths = self.checked_paths();
+        if paths.is_empty() {
+            self.warning_message = Some("No checked files - mark them with Tab first".to_string());
+            return;
+        }
+
+        let executor = GitExecutor::new();
+        let result = if stage {
+            executor.stage_files(&paths)
+        } else {
+            executor.unstage_files(&paths)
+        };
+        match result {
+            Ok(()) => {
+                let action = if stage { "Staged" } else { "Unstaged" };
+                self.warning_message = Some(format!("{} {} file(s)", action, paths.len()));
+                self.refresh_staged_files();
+            }
+            Err(e) => self.warning_message = Some(format!("{e}")),
+        }
+    }
+
+    fn begin_commit(&mut self) {
+        if !self.is_working_tree_mode() {
+            self.warning_message = Some("Committing works in the working tree view".to_string());
+            return;
+        }
+        self.refresh_staged_files();
+        if self.staged_files.is_empty() {
+            self.warning_message =
+                Some("Nothing staged - check files (Tab) and stage them (s) first".to_string());
+            return;
+        }
+        self.commit_input_mode = true;
+        self.commit_message.clear();
+    }
+
+    fn execute_commit(&mut self) {
+        let message = self.commit_message.trim().to_string();
+        if message.is_empty() {
+            self.warning_message = Some("Commit message is empty".to_string());
+            return;
+        }
+        self.commit_input_mode = false;
+        self.commit_message.clear();
+
+        match GitExecutor::new().commit(&message) {
+            Ok(_) => {
+                self.warning_message = Some(format!("Committed: {message}"));
+                // History caches are stale after a commit
+                self.commits.clear();
+                self.graph_rows.clear();
+                self.reload_diffs();
+            }
+            Err(e) => self.warning_message = Some(format!("{e}")),
+        }
+    }
+
+    /// Re-fetch diffs for the current mode, keeping the selection if possible
+    fn reload_diffs(&mut self) {
+        match get_diffs_from_git(&self.operation_mode) {
+            Ok(diffs) => {
+                // Auto-refresh re-snapshots on its next tick
+                self.last_worktree_diff = None;
+                self.apply_reloaded_diffs(diffs);
+            }
+            Err(e) => self.warning_message = Some(format!("Reload failed: {e}")),
+        }
+    }
+
+    fn apply_reloaded_diffs(&mut self, diffs: Vec<FileDiff>) {
+        let selected_path = self
+            .get_current_file_tree_items()
+            .get(self.selected_index)
+            .map(|item| item.full_path.clone());
+
+        let diff_keys: Vec<DiffFileKey> =
+            diffs.iter().filter_map(|fd| fd.diff_key.clone()).collect();
+        self.checked_files = self
+            .persistence_manager
+            .load_checked_files(&diff_keys)
+            .unwrap_or_default();
+
+        self.original_file_diffs = diffs;
+        self.rebuild_file_tree();
+        if self.search_mode {
+            self.update_search_filter();
+        } else {
+            self.filtered_file_tree_items = self.file_tree_items.clone();
+        }
+
+        // Restore the previous selection if the file still exists
+        let items = self.get_current_file_tree_items();
+        let restored = selected_path
+            .and_then(|path| items.iter().position(|item| item.full_path == path))
+            .unwrap_or_else(|| self.selected_index.min(items.len().saturating_sub(1)));
+        self.selected_index = restored;
+        self.file_list_state.select(Some(self.selected_index));
+
+        if self.file_tree_items.is_empty() {
+            self.diff_output = String::from("No diff content available");
+            self.aligned_rows = None;
+        }
+        self.refresh_staged_files();
+        self.update_diff_content();
+    }
+
+    /// Poll the working tree every couple of seconds and reload when the
+    /// diff actually changed, so reviews track an AI editing files live
+    fn auto_refresh_if_due(&mut self) {
+        if !self.is_working_tree_mode()
+            || self.left_pane != LeftPane::Files
+            || self.search_input_mode
+            || self.commit_input_mode
+            || self.show_help
+        {
+            return;
+        }
+        if self.last_refresh_check.elapsed() < std::time::Duration::from_secs(2) {
+            return;
+        }
+        self.last_refresh_check = std::time::Instant::now();
+
+        let Ok(current) = GitExecutor::new().get_diff(&self.operation_mode) else {
+            return;
+        };
+        match &self.last_worktree_diff {
+            None => self.last_worktree_diff = Some(current),
+            Some(previous) if *previous != current => {
+                let diffs = DiffParser::parse(&current);
+                self.last_worktree_diff = Some(current);
+                self.apply_reloaded_diffs(diffs);
+            }
+            _ => {}
+        }
     }
 
     /// Total entries in the history list (virtual working-tree entry + commits)
@@ -1419,6 +1598,97 @@ fn read_input_completely() -> Result<Vec<FileDiff>> {
     Ok(DiffParser::parse(&buffer))
 }
 
+/// Resolve a listed file to its on-disk location: relative to the
+/// invocation directory first, then the repository root
+fn resolve_editor_path(path: &str) -> Option<std::path::PathBuf> {
+    let direct = std::path::PathBuf::from(path);
+    if direct.exists() {
+        return Some(direct);
+    }
+    if let Ok(root) = GitExecutor::toplevel() {
+        let joined = root.join(path);
+        if joined.exists() {
+            return Some(joined);
+        }
+    }
+    None
+}
+
+/// Editor to launch: config `editor`, then $EDITOR, then the OS default
+/// (file association on Windows, vi elsewhere)
+fn editor_command(config_editor: &str, file: &std::path::Path) -> (String, Vec<String>) {
+    let file_arg = file.display().to_string();
+    let from_spec = |spec: &str| {
+        let mut parts: Vec<String> = spec.split_whitespace().map(String::from).collect();
+        let program = parts.remove(0);
+        parts.push(file_arg.clone());
+        (program, parts)
+    };
+
+    let configured = config_editor.trim();
+    if !configured.is_empty() {
+        return from_spec(configured);
+    }
+    if let Ok(editor) = std::env::var("EDITOR") {
+        if !editor.trim().is_empty() {
+            return from_spec(editor.trim());
+        }
+    }
+    if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/c".to_string(),
+                "start".to_string(),
+                String::new(),
+                file_arg,
+            ],
+        )
+    } else {
+        ("vi".to_string(), vec![file_arg])
+    }
+}
+
+/// Open the selected file in an editor, suspending the TUI while a
+/// terminal editor (vim, nano, ...) has the screen
+fn open_selected_in_editor<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+) -> Result<()> {
+    let Some(item) = app
+        .get_current_file_tree_items()
+        .get(app.selected_index)
+        .cloned()
+    else {
+        return Ok(());
+    };
+    if item.is_directory {
+        return Ok(());
+    }
+    let Some(path) = resolve_editor_path(&item.full_path) else {
+        app.warning_message = Some(format!("File not found on disk: {}", item.full_path));
+        return Ok(());
+    };
+    let (program, args) = editor_command(&app.config.editor, &path);
+
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    let status = Command::new(&program).args(&args).status();
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    terminal.clear()?;
+
+    match status {
+        Ok(_) => {
+            if app.is_working_tree_mode() {
+                app.reload_diffs();
+            }
+        }
+        Err(e) => app.warning_message = Some(format!("Failed to launch {program}: {e}")),
+    }
+    Ok(())
+}
+
 fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -1428,6 +1698,22 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
             match event::read()? {
                 Event::Key(key) => {
                     if key.kind == KeyEventKind::Release {
+                        continue;
+                    }
+                    // Commit message box captures all typing while open
+                    if app.commit_input_mode {
+                        match key.code {
+                            KeyCode::Enter => app.execute_commit(),
+                            KeyCode::Esc => {
+                                app.commit_input_mode = false;
+                                app.commit_message.clear();
+                            }
+                            KeyCode::Backspace => {
+                                app.commit_message.pop();
+                            }
+                            KeyCode::Char(c) => app.commit_message.push(c),
+                            _ => {}
+                        }
                         continue;
                     }
                     match key.code {
@@ -1502,6 +1788,37 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                         KeyCode::Char('1') if !app.search_input_mode => app.show_files_pane(),
                         KeyCode::Char('2') if !app.search_input_mode => app.open_history(),
 
+                        // Staging and committing (working tree view)
+                        KeyCode::Char('s')
+                            if !app.search_input_mode && app.left_pane == LeftPane::Files =>
+                        {
+                            app.stage_checked_files(true)
+                        }
+                        KeyCode::Char('S')
+                            if !app.search_input_mode && app.left_pane == LeftPane::Files =>
+                        {
+                            app.stage_checked_files(false)
+                        }
+                        KeyCode::Char('C')
+                            if !app.search_input_mode && app.left_pane == LeftPane::Files =>
+                        {
+                            app.begin_commit()
+                        }
+
+                        // Open the selected file in an editor
+                        KeyCode::Char('o')
+                            if !app.search_input_mode && app.left_pane == LeftPane::Files =>
+                        {
+                            open_selected_in_editor(terminal, &mut app)?;
+                        }
+
+                        // Reload diffs
+                        KeyCode::Char('r')
+                            if !app.search_input_mode && app.left_pane == LeftPane::Files =>
+                        {
+                            app.reload_diffs()
+                        }
+
                         // Help overlay
                         KeyCode::Char('?') if !app.search_input_mode => {
                             app.show_help = !app.show_help
@@ -1565,6 +1882,8 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                 _ => {}
             }
         }
+
+        app.auto_refresh_if_due();
 
         if app.should_quit {
             return Ok(());
@@ -1650,6 +1969,10 @@ fn ui(f: &mut Frame, app: &mut App) {
     // already computed without the bar - it will show on the next draw.
     if has_warning {
         render_warning_bar(f, right_chunks[2], app);
+    }
+
+    if app.commit_input_mode {
+        render_commit_input(f, f.area(), app);
     }
 
     if app.show_help {
