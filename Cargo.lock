@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "tssdiff"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
