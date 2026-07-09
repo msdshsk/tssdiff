@@ -273,7 +273,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         entry("d/u, PgDn/PgUp", "scroll diff 10 lines"),
         entry("f / b", "scroll diff 20 lines"),
         entry("h/l, H/L", "scroll horizontally 5 / 20 cols"),
-        entry("v", "side-by-side <-> unified diff"),
+        entry("v", "cycle: side-by-side / after only / unified"),
         entry("x", "condensed (hunks) <-> full file"),
         entry("t", "flat list <-> directory tree"),
         entry("Shift+Left/Right", "shrink / widen the file pane"),
@@ -761,9 +761,15 @@ pub fn render_search_box(f: &mut Frame, area: Rect, app: &App) {
 }
 
 pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
+    let after_only = app.view_mode == crate::ViewMode::AfterOnly;
+
     // Re-wrap agent notes when the pane width changed (first frame,
-    // terminal resize, pane divider moved)
-    let note_pane_width = (area.width / 2).saturating_sub(2);
+    // terminal resize, pane divider moved, view mode switched)
+    let note_pane_width = if after_only {
+        area.width.saturating_sub(2)
+    } else {
+        (area.width / 2).saturating_sub(2)
+    };
     if note_pane_width != app.last_note_wrap_width {
         app.last_note_wrap_width = note_pane_width;
         app.refresh_note_display();
@@ -819,47 +825,62 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
         match entry {
             DisplayRow::Row(index) => {
                 let row = &rows[*index];
-                let mut old_line = side_line(row, true, gutter_width, app);
                 let mut new_line = side_line(row, false, gutter_width, app);
                 if is_cursor {
-                    old_line = old_line.style(cursor_bg);
                     new_line = new_line.style(cursor_bg);
                 }
-                old_lines.push(old_line);
                 new_lines.push(new_line);
+                if !after_only {
+                    let mut old_line = side_line(row, true, gutter_width, app);
+                    if is_cursor {
+                        old_line = old_line.style(cursor_bg);
+                    }
+                    old_lines.push(old_line);
+                }
             }
             DisplayRow::Gap { hidden } => {
-                old_lines.push(gap_line(*hidden));
                 new_lines.push(gap_line(*hidden));
+                if !after_only {
+                    old_lines.push(gap_line(*hidden));
+                }
             }
             DisplayRow::Note { note, line } => {
-                old_lines.push(Line::default());
                 new_lines.push(note_line(*note, *line, gutter_width, app));
+                if !after_only {
+                    old_lines.push(Line::default());
+                }
             }
         }
     }
 
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
     let after_title = if app.comment_cursor.is_some() {
         " After - [j/k: line, Enter: comment, Esc: back]"
+    } else if after_only {
+        " After (full width) - [v: unified, c: comment]"
     } else if app.condensed {
-        " After - [v: unified, x: full view]"
+        " After - [v: after only, x: full view]"
     } else {
-        " After - [v: unified, x: condensed]"
+        " After - [v: after only, x: condensed]"
     };
     let border_style = Style::default().fg(app.theme.colors.border.0);
-    let before = Paragraph::new(Text::from(old_lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Before")
-                .style(border_style),
-        )
-        .scroll((0, app.horizontal_scroll));
+    let after_area = if after_only {
+        area
+    } else {
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        let before = Paragraph::new(Text::from(old_lines))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Before")
+                    .style(border_style),
+            )
+            .scroll((0, app.horizontal_scroll));
+        f.render_widget(before, panes[0]);
+        panes[1]
+    };
     let after = Paragraph::new(Text::from(new_lines))
         .block(
             Block::default()
@@ -868,9 +889,7 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
                 .style(border_style),
         )
         .scroll((0, app.horizontal_scroll));
-
-    f.render_widget(before, panes[0]);
-    f.render_widget(after, panes[1]);
+    f.render_widget(after, after_area);
 
     app.aligned_rows = Some(rows);
     app.display_rows = display;

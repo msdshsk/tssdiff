@@ -60,6 +60,9 @@ const HIGHLIGHT_FULL_VIEW_CAP: usize = 4000;
 enum ViewMode {
     /// Before/after panes rendered in-app (default)
     SideBySide,
+    /// Only the After pane, full width with syntax highlighting -
+    /// reading the changed file rather than comparing
+    AfterOnly,
     /// Raw unified diff, optionally piped through an external tool
     Unified,
 }
@@ -567,7 +570,8 @@ impl App {
 
     fn toggle_view_mode(&mut self) {
         self.view_mode = match self.view_mode {
-            ViewMode::SideBySide => ViewMode::Unified,
+            ViewMode::SideBySide => ViewMode::AfterOnly,
+            ViewMode::AfterOnly => ViewMode::Unified,
             ViewMode::Unified => ViewMode::SideBySide,
         };
         self.update_diff_content();
@@ -593,7 +597,7 @@ impl App {
         self.aligned_rows = None;
         self.display_rows.clear();
         self.highlighted = None;
-        if self.view_mode != ViewMode::SideBySide {
+        if self.view_mode == ViewMode::Unified {
             return;
         }
 
@@ -761,9 +765,9 @@ impl App {
     /// Enter comment mode: a line cursor appears in the side-by-side
     /// view; j/k move it, Enter opens the input, Esc leaves
     fn enter_comment_mode(&mut self) {
-        if self.view_mode != ViewMode::SideBySide || self.aligned_rows.is_none() {
+        if self.view_mode == ViewMode::Unified || self.aligned_rows.is_none() {
             self.warning_message =
-                Some("Comments work in the side-by-side view (v to switch)".to_string());
+                Some("Comments work in the side-by-side/after views (v to switch)".to_string());
             return;
         }
         if self.selected_file_path().is_none() {
@@ -2495,7 +2499,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         render_diff_content(f, history_chunks[1], app);
     } else {
         app.regions.graph_area = Rect::default();
-        if app.view_mode == ViewMode::SideBySide && app.aligned_rows.is_some() {
+        if app.view_mode != ViewMode::Unified && app.aligned_rows.is_some() {
             render_side_by_side(f, right_chunks[1], app);
         } else {
             render_diff_content(f, right_chunks[1], app);
@@ -2914,6 +2918,36 @@ mod tests {
         let content = buffer_to_string(terminal.backend().buffer());
         assert!(content.contains("agent:"), "got: {content}");
         assert!(content.contains("This renames the variable."));
+    }
+
+    #[test]
+    fn test_after_only_view_renders_single_pane() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_with_rows(temp.path());
+        app.view_mode = ViewMode::AfterOnly;
+
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(content.contains("After (full width)"));
+        assert!(content.contains("new"));
+        assert!(!content.contains("Before"));
+        // The old side's text does not appear anywhere
+        assert!(!content.contains("old"));
+    }
+
+    #[test]
+    fn test_view_mode_cycles_three_states() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = app_with_rows(temp.path());
+        assert_eq!(app.view_mode, ViewMode::SideBySide);
+        app.toggle_view_mode();
+        assert_eq!(app.view_mode, ViewMode::AfterOnly);
+        app.toggle_view_mode();
+        assert_eq!(app.view_mode, ViewMode::Unified);
+        app.toggle_view_mode();
+        assert_eq!(app.view_mode, ViewMode::SideBySide);
     }
 
     #[test]
