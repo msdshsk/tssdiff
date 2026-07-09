@@ -150,6 +150,9 @@ struct App {
     comment_kind: FeedbackKind,    // Comment vs Question (Tab toggles)
     last_diff_height: u16,         // Diff pane rows from the last frame, for cursor scrolling
     file_pane_hidden: bool,        // z key: hide the left pane, diff takes the full width
+    wrapped_notes: Vec<Vec<String>>, // Notes wrapped (and folded) to the note pane width
+    notes_expanded: bool,            // n key: show long notes in full
+    last_note_wrap_width: u16,       // Note pane content width from the last frame
 }
 
 impl App {
@@ -255,6 +258,9 @@ impl App {
             comment_kind: FeedbackKind::Comment,
             last_diff_height: 30,
             file_pane_hidden: false,
+            wrapped_notes: Vec::new(),
+            notes_expanded: false,
+            last_note_wrap_width: 0,
         };
         app.refresh_aligned_rows();
         app.refresh_staged_files();
@@ -606,6 +612,7 @@ impl App {
             executor.get_file_versions(&self.operation_mode, &file_diff)
         {
             let rows = side_by_side::align(&old_text, &new_text);
+            self.rebuild_wrapped_notes(&rows);
             self.display_rows = self.build_display_rows(&rows);
 
             if self.config.syntax_highlight {
@@ -660,7 +667,12 @@ impl App {
                 let row = &rows[index];
                 for (note_index, note) in self.agent_session.notes.iter().enumerate() {
                     if note.file == file && note.anchors_to(row) {
-                        let body_lines = note.body.lines().count().max(1);
+                        let body_lines = self
+                            .wrapped_notes
+                            .get(note_index)
+                            .map(|wrapped| wrapped.len())
+                            .unwrap_or(1)
+                            .max(1);
                         for line in 0..body_lines {
                             result.push(DisplayRow::Note {
                                 note: note_index,
@@ -674,14 +686,69 @@ impl App {
         result
     }
 
-    /// Re-splice notes into the current display without re-aligning or
-    /// re-highlighting (cheap; used when replies arrive)
+    /// Wrap (and fold) every note body to the current note pane width.
+    /// The result backs both display splicing and rendering
+    fn rebuild_wrapped_notes(&mut self, rows: &[AlignedRow]) {
+        use unicode_width::UnicodeWidthStr;
+
+        /// Notes longer than this many wrapped lines fold down...
+        const NOTE_FOLD_THRESHOLD: usize = 6;
+        /// ...to this many, plus an expander line
+        const NOTE_FOLD_SHOWN: usize = 4;
+
+        let gutter_width = rows
+            .iter()
+            .flat_map(|row| [row.old.as_ref(), row.new.as_ref()])
+            .flatten()
+            .map(|(number, _)| *number)
+            .max()
+            .unwrap_or(1)
+            .to_string()
+            .len()
+            .max(3);
+        let icon_width = match self.config.icon_mode {
+            crate::config::IconMode::Ascii => 1,
+            _ => 2,
+        };
+        // Pane width minus the line-number gutter the notes align with
+        let base = (self.last_note_wrap_width.max(24) as usize).saturating_sub(gutter_width + 1);
+
+        self.wrapped_notes = self
+            .agent_session
+            .notes
+            .iter()
+            .map(|note| {
+                let prefix = icon_width + 1 + note.author.width() + 2;
+                let mut wrapped = agent::wrap_body(
+                    &note.body,
+                    base.saturating_sub(prefix),
+                    base.saturating_sub(3),
+                );
+                if !self.notes_expanded && wrapped.len() > NOTE_FOLD_THRESHOLD {
+                    let hidden = wrapped.len() - NOTE_FOLD_SHOWN;
+                    wrapped.truncate(NOTE_FOLD_SHOWN);
+                    wrapped.push(format!("... (+{hidden} lines - n: expand)"));
+                }
+                wrapped
+            })
+            .collect();
+    }
+
+    /// Re-wrap and re-splice notes into the current display without
+    /// re-aligning or re-highlighting (cheap; used when replies arrive,
+    /// the pane width changes, or folding toggles)
     fn refresh_note_display(&mut self) {
         let Some(rows) = self.aligned_rows.take() else {
             return;
         };
+        self.rebuild_wrapped_notes(&rows);
         self.display_rows = self.build_display_rows(&rows);
         self.aligned_rows = Some(rows);
+    }
+
+    fn toggle_notes_expanded(&mut self) {
+        self.notes_expanded = !self.notes_expanded;
+        self.refresh_note_display();
     }
 
     fn selected_file_path(&self) -> Option<String> {
@@ -2284,6 +2351,11 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                         // Hide/show the file pane (full-width diff)
                         KeyCode::Char('z') if !app.search_input_mode => app.toggle_file_pane(),
 
+                        // Expand/collapse long agent notes
+                        KeyCode::Char('n') if !app.search_input_mode => {
+                            app.toggle_notes_expanded()
+                        }
+
                         // Horizontal scrolling (disabled only when typing in search)
                         KeyCode::Char('h') | KeyCode::Left if !app.search_input_mode => {
                             app.scroll_left(5)
@@ -2842,6 +2914,44 @@ mod tests {
         let content = buffer_to_string(terminal.backend().buffer());
         assert!(content.contains("agent:"), "got: {content}");
         assert!(content.contains("This renames the variable."));
+    }
+
+    #[test]
+    fn test_long_note_wraps_and_folds() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = app_with_rows(temp.path());
+        app.last_note_wrap_width = 40;
+
+        // A long reply: many short lines force wrapping past the fold
+        let body = (1..=12)
+            .map(|i| format!("answer line number {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.agent_session.notes.push(crate::agent::Note {
+            reply_to: None,
+            file: "test.rs".to_string(),
+            old_line: None,
+            new_line: Some(2),
+            body,
+            author: "agent".to_string(),
+        });
+        app.refresh_note_display();
+
+        // Folded: 4 shown lines + the expander
+        let folded = &app.wrapped_notes[0];
+        assert_eq!(folded.len(), 5);
+        assert!(folded.last().unwrap().contains("n: expand"));
+        let note_rows = app
+            .display_rows
+            .iter()
+            .filter(|entry| matches!(entry, side_by_side::DisplayRow::Note { .. }))
+            .count();
+        assert_eq!(note_rows, 5);
+
+        // Expanded: everything visible
+        app.toggle_notes_expanded();
+        assert!(app.wrapped_notes[0].len() >= 12);
+        assert!(!app.wrapped_notes[0].iter().any(|l| l.contains("n: expand")));
     }
 
     #[test]

@@ -445,6 +445,58 @@ pub fn format_markdown(payload: &FeedbackPayload) -> String {
     text
 }
 
+/// Wrap note text to display widths: the first output line has its own
+/// budget (the author prefix takes room), continuations another. Breaks
+/// at the last space inside the window when there is one, hard-breaks
+/// otherwise (CJK text has no spaces).
+pub fn wrap_body(text: &str, first_width: usize, rest_width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        let mut budget = if out.is_empty() {
+            first_width
+        } else {
+            rest_width
+        }
+        .max(4);
+        if raw.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut width = 0usize;
+        let mut last_space: Option<usize> = None; // byte offset into current
+        for ch in raw.chars() {
+            let char_width = ch.width().unwrap_or(0);
+            if width + char_width > budget && !current.is_empty() {
+                if let Some(space) = last_space {
+                    let tail = current[space..].trim_start().to_string();
+                    current.truncate(space);
+                    out.push(std::mem::take(&mut current));
+                    width = tail.chars().map(|c| c.width().unwrap_or(0)).sum();
+                    current = tail;
+                } else {
+                    out.push(std::mem::take(&mut current));
+                    width = 0;
+                }
+                last_space = None;
+                budget = rest_width.max(4);
+            }
+            if ch == ' ' {
+                last_space = Some(current.len());
+            }
+            current.push(ch);
+            width += char_width;
+        }
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
 /// Unified-style excerpt around the target row: the contiguous changed
 /// block containing it, plus a few context lines on each side
 pub fn excerpt(rows: &[AlignedRow], target: usize) -> String {
@@ -564,6 +616,25 @@ mod tests {
         assert!(text.lines().count() <= EXCERPT_MAX_LINES);
         assert!(text.contains("   line47"));
         assert!(text.contains("   line53"));
+    }
+
+    #[test]
+    fn test_wrap_body_spaces_and_cjk() {
+        // Breaks at spaces when possible
+        let wrapped = wrap_body("alpha beta gamma delta", 12, 12);
+        assert_eq!(wrapped, vec!["alpha beta", "gamma delta"]);
+
+        // First line has a smaller budget than continuations
+        let wrapped = wrap_body("alpha beta gamma", 6, 12);
+        assert_eq!(wrapped, vec!["alpha", "beta gamma"]);
+
+        // CJK: no spaces, hard break on display width (2 cells per char)
+        let wrapped = wrap_body("あいうえおかきく", 8, 8);
+        assert_eq!(wrapped, vec!["あいうえ", "おかきく"]);
+
+        // Existing newlines are preserved, empty input yields one line
+        assert_eq!(wrap_body("a\n\nb", 10, 10), vec!["a", "", "b"]);
+        assert_eq!(wrap_body("", 10, 10), vec![""]);
     }
 
     #[test]

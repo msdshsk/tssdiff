@@ -288,6 +288,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         entry("o", "open file in editor"),
         entry("r", "reload diffs"),
         entry("c", "comment / question to agent (side-by-side)"),
+        entry("n", "expand / collapse long agent notes"),
         Line::default(),
         section(" Mouse"),
         entry("click", "select entry / menu, click again: open"),
@@ -760,6 +761,14 @@ pub fn render_search_box(f: &mut Frame, area: Rect, app: &App) {
 }
 
 pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
+    // Re-wrap agent notes when the pane width changed (first frame,
+    // terminal resize, pane divider moved)
+    let note_pane_width = (area.width / 2).saturating_sub(2);
+    if note_pane_width != app.last_note_wrap_width {
+        app.last_note_wrap_width = note_pane_width;
+        app.refresh_note_display();
+    }
+
     let Some(rows) = app.aligned_rows.take() else {
         return;
     };
@@ -941,7 +950,12 @@ fn note_line(note_index: usize, body_line: usize, gutter_width: usize, app: &App
     let Some(note) = app.agent_session.notes.get(note_index) else {
         return Line::default();
     };
-    let text = note.body.lines().nth(body_line).unwrap_or("").to_string();
+    let text = app
+        .wrapped_notes
+        .get(note_index)
+        .and_then(|wrapped| wrapped.get(body_line))
+        .cloned()
+        .unwrap_or_default();
 
     let is_own = note.author == "you";
     let author_color = if is_own {
