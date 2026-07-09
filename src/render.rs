@@ -276,6 +276,8 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         entry("v", "side-by-side <-> unified diff"),
         entry("x", "condensed (hunks) <-> full file"),
         entry("t", "flat list <-> directory tree"),
+        entry("Shift+Left/Right", "shrink / widen the file pane"),
+        entry("z", "hide / show the file pane"),
         entry("Ctrl+L", "force full repaint"),
         Line::default(),
         section(" Files"),

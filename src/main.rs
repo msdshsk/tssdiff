@@ -149,6 +149,7 @@ struct App {
     comment_text: String,          // Comment being typed
     comment_kind: FeedbackKind,    // Comment vs Question (Tab toggles)
     last_diff_height: u16,         // Diff pane rows from the last frame, for cursor scrolling
+    file_pane_hidden: bool,        // z key: hide the left pane, diff takes the full width
 }
 
 impl App {
@@ -253,6 +254,7 @@ impl App {
             comment_text: String::new(),
             comment_kind: FeedbackKind::Comment,
             last_diff_height: 30,
+            file_pane_hidden: false,
         };
         app.refresh_aligned_rows();
         app.refresh_staged_files();
@@ -563,6 +565,21 @@ impl App {
             ViewMode::Unified => ViewMode::SideBySide,
         };
         self.update_diff_content();
+    }
+
+    /// Shift+Left/Right moves the pane divider: positive delta widens
+    /// the file pane. Resizing a hidden pane brings it back first
+    fn resize_file_pane(&mut self, delta: i16) {
+        if self.file_pane_hidden {
+            self.file_pane_hidden = false;
+            return;
+        }
+        let percent = (self.config.file_pane_percent as i16 + delta).clamp(10, 60);
+        self.config.file_pane_percent = percent as u16;
+    }
+
+    fn toggle_file_pane(&mut self) {
+        self.file_pane_hidden = !self.file_pane_hidden;
     }
 
     /// Recompute the before/after rows for the currently selected file
@@ -2250,6 +2267,23 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                         KeyCode::Char('f') if !app.search_input_mode => app.scroll_down(20),
                         KeyCode::Char('b') if !app.search_input_mode => app.scroll_up(20),
 
+                        // Shift+arrows move the pane divider
+                        KeyCode::Left
+                            if key.modifiers.contains(KeyModifiers::SHIFT)
+                                && !app.search_input_mode =>
+                        {
+                            app.resize_file_pane(-5)
+                        }
+                        KeyCode::Right
+                            if key.modifiers.contains(KeyModifiers::SHIFT)
+                                && !app.search_input_mode =>
+                        {
+                            app.resize_file_pane(5)
+                        }
+
+                        // Hide/show the file pane (full-width diff)
+                        KeyCode::Char('z') if !app.search_input_mode => app.toggle_file_pane(),
+
                         // Horizontal scrolling (disabled only when typing in search)
                         KeyCode::Char('h') | KeyCode::Left if !app.search_input_mode => {
                             app.scroll_left(5)
@@ -2323,16 +2357,28 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     render_menu_bar(f, frame_chunks[0], app);
 
-    // Main horizontal split: left list (20%) and diff content area (80%)
+    // Main horizontal split: left list and diff content area. The
+    // divider position is user-adjustable (Shift+arrows), z hides the
+    // list entirely
+    let list_percent = if app.file_pane_hidden {
+        0
+    } else {
+        app.config.file_pane_percent.clamp(10, 60)
+    };
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+        .constraints([
+            Constraint::Percentage(list_percent),
+            Constraint::Percentage(100 - list_percent),
+        ])
         .split(frame_chunks[1]);
 
     app.regions.left_column = main_chunks[0];
 
     // Left pane: commit history, or file list with optional search box
-    if app.left_pane == LeftPane::History {
+    if app.file_pane_hidden {
+        app.regions.list_area = Rect::default();
+    } else if app.left_pane == LeftPane::History {
         app.regions.list_area = main_chunks[0];
         render_commit_list(f, main_chunks[0], app);
     } else if app.search_mode {

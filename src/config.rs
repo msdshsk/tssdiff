@@ -183,6 +183,11 @@ pub struct Config {
     #[serde(default = "default_condensed_view")]
     pub condensed_view: bool,
 
+    /// Width of the file/history pane as a percent of the terminal
+    /// (Shift+Left/Right adjusts at runtime, z hides the pane)
+    #[serde(default = "default_file_pane_percent")]
+    pub file_pane_percent: u16,
+
     /// Agent feedback (c key): sink selection and command sink settings
     #[serde(default)]
     pub agent: AgentConfig,
@@ -193,6 +198,10 @@ pub struct Config {
 
 fn default_condensed_view() -> bool {
     true
+}
+
+fn default_file_pane_percent() -> u16 {
+    20
 }
 
 fn default_syntax_highlight() -> bool {
@@ -214,6 +223,7 @@ impl Default for Config {
             syntax_highlight: default_syntax_highlight(),
             syntax_theme: default_syntax_theme(),
             condensed_view: default_condensed_view(),
+            file_pane_percent: default_file_pane_percent(),
             agent: AgentConfig::default(),
             theme: Theme::default(),
         }
