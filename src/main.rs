@@ -1,3 +1,4 @@
+mod agent;
 mod cli;
 mod config;
 mod diff;
@@ -11,6 +12,7 @@ mod side_by_side;
 mod theme;
 mod tree;
 
+use crate::agent::{AgentSession, FeedbackKind};
 use crate::cli::{Cli, OperationMode};
 use crate::config::{Config, DiffCommandType};
 use crate::git::{CommitInfo, GitExecutor, GraphRow};
@@ -18,9 +20,9 @@ use crate::highlight::HighlightedLines;
 use crate::parser::{DiffFileKey, DiffParser, FileDiff};
 use crate::persistence::PersistenceManager;
 use crate::render::{
-    render_commit_graph, render_commit_input, render_commit_list, render_diff_content,
-    render_file_list, render_help_overlay, render_menu_bar, render_search_box, render_side_by_side,
-    render_status_line, render_warning_bar,
+    render_comment_input, render_commit_graph, render_commit_input, render_commit_list,
+    render_diff_content, render_file_list, render_help_overlay, render_menu_bar,
+    render_search_box, render_side_by_side, render_status_line, render_warning_bar,
 };
 use crate::side_by_side::AlignedRow;
 use crate::theme::Theme;
@@ -140,6 +142,13 @@ struct App {
     commit_message: String,                          // Commit message being typed
     last_refresh_check: std::time::Instant,          // Auto-refresh timer
     last_worktree_diff: Option<String>,              // Raw diff snapshot for change detection
+    // Agent feedback (c key): line cursor, input box, and reply notes
+    agent_session: AgentSession,
+    comment_cursor: Option<usize>, // Display-row index; Some = comment mode active
+    comment_input_mode: bool,      // Comment text box visibility
+    comment_text: String,          // Comment being typed
+    comment_kind: FeedbackKind,    // Comment vs Question (Tab toggles)
+    last_diff_height: u16,         // Diff pane rows from the last frame, for cursor scrolling
 }
 
 impl App {
@@ -234,6 +243,16 @@ impl App {
             commit_message: String::new(),
             last_refresh_check: std::time::Instant::now(),
             last_worktree_diff: None,
+            agent_session: AgentSession::new(
+                GitExecutor::toplevel()
+                    .or_else(|_| std::env::current_dir())
+                    .unwrap_or_default(),
+            ),
+            comment_cursor: None,
+            comment_input_mode: false,
+            comment_text: String::new(),
+            comment_kind: FeedbackKind::Comment,
+            last_diff_height: 30,
         };
         app.refresh_aligned_rows();
         app.refresh_staged_files();
@@ -384,6 +403,7 @@ impl App {
             || self.left_pane != LeftPane::Files
             || self.search_input_mode
             || self.commit_input_mode
+            || self.comment_cursor.is_some()
             || self.show_help
         {
             return;
@@ -569,11 +589,7 @@ impl App {
             executor.get_file_versions(&self.operation_mode, &file_diff)
         {
             let rows = side_by_side::align(&old_text, &new_text);
-            self.display_rows = if self.condensed {
-                side_by_side::condense(&rows, CONDENSED_CONTEXT)
-            } else {
-                (0..rows.len()).map(side_by_side::DisplayRow::Row).collect()
-            };
+            self.display_rows = self.build_display_rows(&rows);
 
             if self.config.syntax_highlight {
                 // Highlighting must run from the file start, so cap it at
@@ -599,6 +615,206 @@ impl App {
         self.condensed = !self.condensed;
         self.vertical_scroll = 0;
         self.refresh_aligned_rows();
+    }
+
+    /// Condensed-or-full row order with inline agent notes spliced in
+    /// after the rows they anchor to
+    fn build_display_rows(&self, rows: &[AlignedRow]) -> Vec<side_by_side::DisplayRow> {
+        use side_by_side::DisplayRow;
+
+        let base: Vec<DisplayRow> = if self.condensed {
+            side_by_side::condense(rows, CONDENSED_CONTEXT)
+        } else {
+            (0..rows.len()).map(DisplayRow::Row).collect()
+        };
+
+        let Some(file) = self.selected_file_path() else {
+            return base;
+        };
+        let file = file.replace('\\', "/");
+        if self.agent_session.notes.is_empty() {
+            return base;
+        }
+
+        let mut result = Vec::with_capacity(base.len());
+        for entry in base {
+            result.push(entry);
+            if let DisplayRow::Row(index) = entry {
+                let row = &rows[index];
+                for (note_index, note) in self.agent_session.notes.iter().enumerate() {
+                    if note.file == file && note.anchors_to(row) {
+                        let body_lines = note.body.lines().count().max(1);
+                        for line in 0..body_lines {
+                            result.push(DisplayRow::Note {
+                                note: note_index,
+                                line,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Re-splice notes into the current display without re-aligning or
+    /// re-highlighting (cheap; used when replies arrive)
+    fn refresh_note_display(&mut self) {
+        let Some(rows) = self.aligned_rows.take() else {
+            return;
+        };
+        self.display_rows = self.build_display_rows(&rows);
+        self.aligned_rows = Some(rows);
+    }
+
+    fn selected_file_path(&self) -> Option<String> {
+        self.get_current_file_tree_items()
+            .get(self.selected_index)
+            .filter(|item| !item.is_directory)
+            .map(|item| item.full_path.clone())
+    }
+
+    /// Enter comment mode: a line cursor appears in the side-by-side
+    /// view; j/k move it, Enter opens the input, Esc leaves
+    fn enter_comment_mode(&mut self) {
+        if self.view_mode != ViewMode::SideBySide || self.aligned_rows.is_none() {
+            self.warning_message =
+                Some("Comments work in the side-by-side view (v to switch)".to_string());
+            return;
+        }
+        if self.selected_file_path().is_none() {
+            self.warning_message = Some("Select a file to comment on".to_string());
+            return;
+        }
+        let start = self.vertical_scroll as usize;
+        let cursor = self
+            .display_rows
+            .iter()
+            .enumerate()
+            .skip(start)
+            .find(|(_, entry)| matches!(entry, side_by_side::DisplayRow::Row(_)))
+            .or_else(|| {
+                self.display_rows
+                    .iter()
+                    .enumerate()
+                    .find(|(_, entry)| matches!(entry, side_by_side::DisplayRow::Row(_)))
+            })
+            .map(|(index, _)| index);
+        match cursor {
+            Some(index) => {
+                self.comment_cursor = Some(index);
+                self.ensure_comment_cursor_visible();
+            }
+            None => self.warning_message = Some("No diff lines to comment on".to_string()),
+        }
+    }
+
+    fn exit_comment_mode(&mut self) {
+        self.comment_cursor = None;
+        self.comment_input_mode = false;
+        self.comment_text.clear();
+    }
+
+    /// Move the comment cursor by whole diff rows, skipping gap markers
+    /// and note lines
+    fn comment_cursor_move(&mut self, delta: isize, steps: usize) {
+        for _ in 0..steps {
+            let Some(current) = self.comment_cursor else {
+                return;
+            };
+            let mut index = current as isize;
+            loop {
+                index += delta.signum();
+                if index < 0 || index as usize >= self.display_rows.len() {
+                    return;
+                }
+                if matches!(
+                    self.display_rows[index as usize],
+                    side_by_side::DisplayRow::Row(_)
+                ) {
+                    break;
+                }
+            }
+            self.comment_cursor = Some(index as usize);
+        }
+        self.ensure_comment_cursor_visible();
+    }
+
+    fn comment_cursor_jump(&mut self, to_end: bool) {
+        let position = if to_end {
+            self.display_rows
+                .iter()
+                .rposition(|entry| matches!(entry, side_by_side::DisplayRow::Row(_)))
+        } else {
+            self.display_rows
+                .iter()
+                .position(|entry| matches!(entry, side_by_side::DisplayRow::Row(_)))
+        };
+        if let Some(index) = position {
+            self.comment_cursor = Some(index);
+            self.ensure_comment_cursor_visible();
+        }
+    }
+
+    fn ensure_comment_cursor_visible(&mut self) {
+        let Some(cursor) = self.comment_cursor else {
+            return;
+        };
+        let height = self.last_diff_height.max(1) as usize;
+        let top = self.vertical_scroll as usize;
+        if cursor < top {
+            self.vertical_scroll = cursor as u16;
+        } else if cursor >= top + height {
+            self.vertical_scroll = (cursor + 1 - height) as u16;
+        }
+    }
+
+    /// Send the typed comment/question for the cursor row through the
+    /// configured sink
+    fn send_comment(&mut self) {
+        let text = self.comment_text.trim().to_string();
+        if text.is_empty() {
+            self.warning_message = Some("Comment is empty".to_string());
+            return;
+        }
+        let Some(cursor) = self.comment_cursor else {
+            return;
+        };
+        let Some(side_by_side::DisplayRow::Row(row_index)) =
+            self.display_rows.get(cursor).copied()
+        else {
+            return;
+        };
+        let Some(file) = self.selected_file_path() else {
+            return;
+        };
+        let Some(rows) = self.aligned_rows.take() else {
+            return;
+        };
+
+        let payload = self.agent_session.build_payload(
+            self.comment_kind,
+            &file,
+            &rows[row_index],
+            &rows,
+            row_index,
+            &text,
+        );
+        let result = self.agent_session.send(&self.config.agent, &payload);
+        self.aligned_rows = Some(rows);
+
+        match result {
+            Ok(status) => {
+                self.warning_message =
+                    Some(format!("{} sent ({status})", self.comment_kind.label()));
+                self.exit_comment_mode();
+                self.refresh_note_display();
+            }
+            Err(e) => {
+                // Keep the input open so the text is not lost
+                self.warning_message = Some(format!("Send failed: {e}"));
+            }
+        }
     }
 
     /// Switch the file list between flat full-path and directory tree,
@@ -832,6 +1048,8 @@ impl App {
     }
 
     fn update_diff_content(&mut self) {
+        // The comment cursor points into the old file's rows
+        self.exit_comment_mode();
         let current_items = self.get_current_file_tree_items();
         if let Some(tree_item) = current_items.get(self.selected_index) {
             if let Some(file_diff) = &tree_item.file_diff {
@@ -1832,6 +2050,44 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                         }
                         continue;
                     }
+                    // Comment input box captures all typing while open
+                    if app.comment_input_mode {
+                        match key.code {
+                            KeyCode::Enter => app.send_comment(),
+                            KeyCode::Esc => {
+                                app.comment_input_mode = false;
+                                app.comment_text.clear();
+                            }
+                            KeyCode::Tab => app.comment_kind = app.comment_kind.toggle(),
+                            KeyCode::Backspace => {
+                                app.comment_text.pop();
+                            }
+                            KeyCode::Char(c) => app.comment_text.push(c),
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    // Comment mode: the line cursor owns navigation keys
+                    if app.comment_cursor.is_some() {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => app.exit_comment_mode(),
+                            KeyCode::Down | KeyCode::Char('j') => app.comment_cursor_move(1, 1),
+                            KeyCode::Up | KeyCode::Char('k') => app.comment_cursor_move(-1, 1),
+                            KeyCode::Char('d') | KeyCode::PageDown => {
+                                app.comment_cursor_move(1, 10)
+                            }
+                            KeyCode::Char('u') | KeyCode::PageUp => {
+                                app.comment_cursor_move(-1, 10)
+                            }
+                            KeyCode::Char('g') => app.comment_cursor_jump(false),
+                            KeyCode::Char('G') => app.comment_cursor_jump(true),
+                            KeyCode::Enter | KeyCode::Char('c') => {
+                                app.comment_input_mode = true;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     match key.code {
                         // Quit or exit search mode
                         KeyCode::Char('q') => {
@@ -1948,6 +2204,13 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                             open_selected_in_editor(terminal, &mut app)?;
                         }
 
+                        // Comment / question to an agent (side-by-side view)
+                        KeyCode::Char('c')
+                            if !app.search_input_mode && app.left_pane == LeftPane::Files =>
+                        {
+                            app.enter_comment_mode()
+                        }
+
                         // Reload diffs
                         KeyCode::Char('r')
                             if !app.search_input_mode && app.left_pane == LeftPane::Files =>
@@ -2038,6 +2301,11 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
 
         app.auto_refresh_if_due();
 
+        // Agent replies appended to the reply file appear inline
+        if app.agent_session.poll_replies() {
+            app.refresh_note_display();
+        }
+
         if app.should_quit {
             return Ok(());
         }
@@ -2126,6 +2394,10 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     if app.commit_input_mode {
         render_commit_input(f, f.area(), app);
+    }
+
+    if app.comment_input_mode {
+        render_comment_input(f, f.area(), app);
     }
 
     if app.show_help {
@@ -2431,6 +2703,116 @@ mod tests {
         terminal.draw(|f| ui(f, &mut app)).unwrap();
         let content = buffer_to_string(terminal.backend().buffer());
         assert!(content.contains("Warning"));
+    }
+
+    /// App with one file selected and side-by-side rows prepared, and the
+    /// agent session pointed at a temp dir so tests never touch the repo
+    fn app_with_rows(temp: &std::path::Path) -> App {
+        let config = Config::default();
+        let file_diffs = vec![FileDiff {
+            filename: "test.rs".to_string(),
+            old_path: None,
+            new_path: None,
+            content: "-old\n+new\n".to_string(),
+            added_lines: 1,
+            removed_lines: 1,
+            diff_key: None,
+        }];
+        let mut app = App::new(
+            config,
+            file_diffs,
+            OperationMode::Compare {
+                target1: "a".to_string(),
+                target2: "b".to_string(),
+            },
+        )
+        .unwrap();
+        app.agent_session = AgentSession::new(temp.to_path_buf());
+        let rows = side_by_side::align("a\nold\nz\n", "a\nnew\nz\n");
+        app.display_rows = (0..rows.len()).map(side_by_side::DisplayRow::Row).collect();
+        app.aligned_rows = Some(rows);
+        app
+    }
+
+    #[test]
+    fn test_comment_mode_send_via_file_sink() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = app_with_rows(temp.path());
+        app.config.agent.sink = crate::config::SinkKind::File;
+
+        app.enter_comment_mode();
+        assert_eq!(app.comment_cursor, Some(0));
+        // Cursor moves over rows and clamps at the end
+        app.comment_cursor_move(1, 1);
+        assert_eq!(app.comment_cursor, Some(1));
+        app.comment_cursor_move(1, 10);
+        assert_eq!(app.comment_cursor, Some(2));
+
+        app.comment_cursor = Some(1); // the changed row
+        app.comment_text = "why this change?".to_string();
+        app.comment_kind = FeedbackKind::Question;
+        app.send_comment();
+
+        // Payload written through the file sink
+        let outbox = temp.path().join(".tssdiff").join("outbox.jsonl");
+        let content = std::fs::read_to_string(outbox).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(payload["kind"], "question");
+        assert_eq!(payload["file"], "test.rs");
+        assert_eq!(payload["new_line"], 2);
+        assert!(payload["hunk_text"].as_str().unwrap().contains("+ new"));
+
+        // Question resets the reply transport for this session
+        assert!(temp.path().join(".tssdiff").join("replies.jsonl").exists());
+
+        // Comment mode closed, own note spliced beneath the row
+        assert!(app.comment_cursor.is_none());
+        assert!(!app.comment_input_mode);
+        assert!(app.display_rows.iter().any(|entry| matches!(
+            entry,
+            side_by_side::DisplayRow::Note { note: 0, line: 0 }
+        )));
+        assert!(app.warning_message.as_deref().unwrap().contains("sent"));
+    }
+
+    #[test]
+    fn test_agent_note_renders_inline() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_with_rows(temp.path());
+
+        app.agent_session.notes.push(crate::agent::Note {
+            reply_to: None,
+            file: "test.rs".to_string(),
+            old_line: None,
+            new_line: Some(2),
+            body: "This renames the variable.".to_string(),
+            author: "agent".to_string(),
+        });
+        app.refresh_note_display();
+
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(content.contains("agent:"), "got: {content}");
+        assert!(content.contains("This renames the variable."));
+    }
+
+    #[test]
+    fn test_comment_input_popup_renders() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_with_rows(temp.path());
+        app.comment_cursor = Some(1);
+        app.comment_input_mode = true;
+        app.comment_text = "typed text".to_string();
+        app.comment_kind = FeedbackKind::Question;
+
+        terminal.draw(|f| ui(f, &mut app)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(content.contains("Send to agent [Question]"));
+        assert!(content.contains("typed text"));
     }
 
     fn buffer_to_string(buffer: &Buffer) -> String {

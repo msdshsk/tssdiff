@@ -100,6 +100,54 @@ pub struct GitConfig {
     pub paging: GitPagingConfig,
 }
 
+/// Where feedback sent with `c` (comment/question to an agent) goes
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SinkKind {
+    /// Copy formatted markdown to the system clipboard
+    #[default]
+    Clipboard,
+    /// Append the JSON payload to `.tssdiff/outbox.jsonl` (or `outboxFile`)
+    File,
+    /// Pipe the JSON payload to `sinkCommand` via stdin
+    Command,
+}
+
+/// Agent feedback settings (see src/agent.rs for the payload contract)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub sink: SinkKind,
+
+    /// Command line for the command sink; receives one JSON payload on
+    /// stdin, exit 0 = delivered
+    #[serde(default, rename = "sinkCommand")]
+    pub sink_command: String,
+
+    /// How long the command sink may run before being killed
+    #[serde(default = "default_sink_timeout_ms", rename = "sinkTimeoutMs")]
+    pub sink_timeout_ms: u64,
+
+    /// Override for the file sink target path (empty = repo/.tssdiff/outbox.jsonl)
+    #[serde(default, rename = "outboxFile")]
+    pub outbox_file: String,
+}
+
+fn default_sink_timeout_ms() -> u64 {
+    5000
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            sink: SinkKind::default(),
+            sink_command: String::new(),
+            sink_timeout_ms: default_sink_timeout_ms(),
+            outbox_file: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
@@ -135,6 +183,10 @@ pub struct Config {
     #[serde(default = "default_condensed_view")]
     pub condensed_view: bool,
 
+    /// Agent feedback (c key): sink selection and command sink settings
+    #[serde(default)]
+    pub agent: AgentConfig,
+
     #[serde(default)]
     pub theme: Theme,
 }
@@ -162,6 +214,7 @@ impl Default for Config {
             syntax_highlight: default_syntax_highlight(),
             syntax_theme: default_syntax_theme(),
             condensed_view: default_condensed_view(),
+            agent: AgentConfig::default(),
             theme: Theme::default(),
         }
     }

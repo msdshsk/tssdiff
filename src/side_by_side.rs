@@ -95,12 +95,14 @@ fn clean(line: &str) -> String {
     line.trim_end_matches('\r').to_string()
 }
 
-/// One row of the condensed display: an aligned row by index, or a
-/// collapsed run of unchanged lines
+/// One row of the condensed display: an aligned row by index, a
+/// collapsed run of unchanged lines, or one line of an inline agent
+/// note (`note` indexes the app's note list, `line` its body line)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayRow {
     Row(usize),
     Gap { hidden: usize },
+    Note { note: usize, line: usize },
 }
 
 /// Keep rows within `context` lines of a change and collapse longer
@@ -151,7 +153,7 @@ pub fn max_needed_line(rows: &[AlignedRow], display: &[DisplayRow]) -> usize {
         .iter()
         .filter_map(|entry| match entry {
             DisplayRow::Row(index) => rows.get(*index),
-            DisplayRow::Gap { .. } => None,
+            DisplayRow::Gap { .. } | DisplayRow::Note { .. } => None,
         })
         .flat_map(|row| [row.old.as_ref(), row.new.as_ref()])
         .flatten()

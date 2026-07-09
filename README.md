@@ -20,6 +20,7 @@ ftdv is a modern TUI diff pager focused on interactive git integration:
 - Support for multiple diff tools: delta, bat, ydiff, difftastic, and more
 - ANSI color support - automatically detects and renders colored output
 - Checkbox functionality to mark reviewed files (review tracking)
+- Agent feedback: send line comments/questions to an AI coding agent and see replies inline ([docs](docs/agent-feedback.md))
 - Persistent state management for checked files
 - Search functionality with real-time filtering
 - Vim-style keyboard navigation

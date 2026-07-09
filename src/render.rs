@@ -273,6 +273,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         entry("C", "commit staged changes"),
         entry("o", "open file in editor"),
         entry("r", "reload diffs"),
+        entry("c", "comment / question to agent (side-by-side)"),
         Line::default(),
         section(" Mouse"),
         entry("click", "select entry / menu, click again: open"),
@@ -750,6 +751,7 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Clamp scrolling to the displayed content
     let visible_height = area.height.saturating_sub(2) as usize;
+    app.last_diff_height = visible_height as u16;
     let max_vertical = display.len().saturating_sub(visible_height) as u16;
     app.vertical_scroll = app.vertical_scroll.min(max_vertical);
 
@@ -779,18 +781,30 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
         ))
     };
 
+    let cursor_bg = Style::default().bg(app.theme.colors.tree_selected_bg.0);
     let mut old_lines: Vec<Line> = Vec::with_capacity(end - start);
     let mut new_lines: Vec<Line> = Vec::with_capacity(end - start);
-    for entry in &display[start..end] {
+    for (offset, entry) in display[start..end].iter().enumerate() {
+        let is_cursor = app.comment_cursor == Some(start + offset);
         match entry {
             DisplayRow::Row(index) => {
                 let row = &rows[*index];
-                old_lines.push(side_line(row, true, gutter_width, app));
-                new_lines.push(side_line(row, false, gutter_width, app));
+                let mut old_line = side_line(row, true, gutter_width, app);
+                let mut new_line = side_line(row, false, gutter_width, app);
+                if is_cursor {
+                    old_line = old_line.style(cursor_bg);
+                    new_line = new_line.style(cursor_bg);
+                }
+                old_lines.push(old_line);
+                new_lines.push(new_line);
             }
             DisplayRow::Gap { hidden } => {
                 old_lines.push(gap_line(*hidden));
                 new_lines.push(gap_line(*hidden));
+            }
+            DisplayRow::Note { note, line } => {
+                old_lines.push(Line::default());
+                new_lines.push(note_line(*note, *line, gutter_width, app));
             }
         }
     }
@@ -800,7 +814,9 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    let after_title = if app.condensed {
+    let after_title = if app.comment_cursor.is_some() {
+        " After - [j/k: line, Enter: comment, Esc: back]"
+    } else if app.condensed {
         " After - [v: unified, x: full view]"
     } else {
         " After - [v: unified, x: condensed]"
@@ -896,6 +912,84 @@ fn side_line(row: &AlignedRow, old_side: bool, gutter_width: usize, app: &App) -
         Some(bg) => line.style(Style::default().bg(bg)),
         None => line,
     }
+}
+
+/// One body line of an inline agent note, shown in the After pane
+/// beneath the row it anchors to
+fn note_line(note_index: usize, body_line: usize, gutter_width: usize, app: &App) -> Line<'static> {
+    let Some(note) = app.agent_session.notes.get(note_index) else {
+        return Line::default();
+    };
+    let text = note.body.lines().nth(body_line).unwrap_or("").to_string();
+
+    let is_own = note.author == "you";
+    let author_color = if is_own {
+        app.theme.colors.status_modified.0
+    } else {
+        app.theme.colors.status_added.0
+    };
+    let icon = match app.config.icon_mode {
+        crate::config::IconMode::Ascii => "*",
+        _ => "💬",
+    };
+
+    let mut spans = vec![Span::styled(
+        format!("{:>gutter_width$} ", ""),
+        Style::default().fg(app.theme.colors.text_dim.0),
+    )];
+    if body_line == 0 {
+        spans.push(Span::styled(
+            format!("{icon} {}: ", note.author),
+            Style::default()
+                .fg(author_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        spans.push(Span::raw("   "));
+    }
+    spans.push(Span::styled(
+        text,
+        Style::default().fg(app.theme.colors.text_primary.0),
+    ));
+    Line::from(spans)
+}
+
+/// Popup for typing a comment/question to the agent (c key)
+pub fn render_comment_input(f: &mut Frame, area: Rect, app: &App) {
+    let width = 72.min(area.width.saturating_sub(4));
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(3) / 2,
+        width,
+        height: 3,
+    };
+
+    let cursor = match app.config.icon_mode {
+        crate::config::IconMode::Ascii => "_",
+        _ => "▏",
+    };
+    let title = format!(
+        " Send to agent [{}] (Enter: send, Tab: kind, Esc: back)",
+        app.comment_kind.label()
+    );
+    f.render_widget(Clear, popup);
+    let input = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!(" {}", app.comment_text),
+            Style::default().fg(app.theme.colors.text_primary.0),
+        ),
+        Span::styled(
+            cursor,
+            Style::default().fg(app.theme.colors.border_focused.0),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(Style::default().fg(app.theme.colors.border_focused.0)),
+    );
+    f.render_widget(input, popup);
 }
 
 pub fn render_warning_bar(f: &mut Frame, area: Rect, app: &App) {
