@@ -70,7 +70,13 @@ pub struct FeedbackPayload {
     pub file: String,
     pub old_line: Option<usize>,
     pub new_line: Option<usize>,
-    /// Unified-style excerpt of the change around the selected line
+    /// Inclusive [start, end] line spans when a multi-line range was
+    /// selected (schema v1 additive; single lines have start == end)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_range: Option<[usize; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_range: Option<[usize; 2]>,
+    /// Unified-style excerpt of the change around the selected lines
     pub hunk_text: String,
     pub comment: String,
     /// Absolute path agents should append reply JSON lines to
@@ -147,25 +153,44 @@ impl AgentSession {
         id
     }
 
-    /// Build the payload for the current selection and comment text
+    /// Build the payload for the selected row range (inclusive row
+    /// indices into `rows`; single-line selections have start == end)
     pub fn build_payload(
         &mut self,
         kind: FeedbackKind,
         file: &str,
-        row: &AlignedRow,
         rows: &[AlignedRow],
-        row_index: usize,
+        selection_start: usize,
+        selection_end: usize,
         comment: &str,
     ) -> FeedbackPayload {
+        let selection_start = selection_start.min(rows.len().saturating_sub(1));
+        let selection_end = selection_end.clamp(selection_start, rows.len().saturating_sub(1));
+        let selected = &rows[selection_start..=selection_end];
+
+        let old_lines: Vec<usize> = selected
+            .iter()
+            .filter_map(|row| row.old.as_ref().map(|(n, _)| *n))
+            .collect();
+        let new_lines: Vec<usize> = selected
+            .iter()
+            .filter_map(|row| row.new.as_ref().map(|(n, _)| *n))
+            .collect();
+        let span = |lines: &[usize]| -> Option<[usize; 2]> {
+            Some([*lines.first()?, *lines.last()?])
+        };
+
         FeedbackPayload {
             version: PAYLOAD_VERSION,
             id: self.next_feedback_id(),
             kind: kind.as_str().to_string(),
             repo: path_string(&self.repo),
             file: file.replace('\\', "/"),
-            old_line: row.old.as_ref().map(|(n, _)| *n),
-            new_line: row.new.as_ref().map(|(n, _)| *n),
-            hunk_text: excerpt(rows, row_index),
+            old_line: old_lines.first().copied(),
+            new_line: new_lines.first().copied(),
+            old_range: span(&old_lines),
+            new_range: span(&new_lines),
+            hunk_text: excerpt(rows, selection_start, selection_end),
             comment: comment.to_string(),
             reply_file: path_string(&self.reply_path),
             timestamp: unix_now(),
@@ -497,30 +522,31 @@ pub fn wrap_body(text: &str, first_width: usize, rest_width: usize) -> Vec<Strin
     out
 }
 
-/// Unified-style excerpt around the target row: the contiguous changed
-/// block containing it, plus a few context lines on each side
-pub fn excerpt(rows: &[AlignedRow], target: usize) -> String {
+/// Unified-style excerpt around the selected row range: the contiguous
+/// changed block containing it, plus a few context lines on each side.
+/// Selected rows are marked with a leading `>`
+pub fn excerpt(rows: &[AlignedRow], selection_start: usize, selection_end: usize) -> String {
     if rows.is_empty() {
         return String::new();
     }
-    let target = target.min(rows.len() - 1);
+    let selection_start = selection_start.min(rows.len() - 1);
+    let selection_end = selection_end.clamp(selection_start, rows.len() - 1);
 
-    // Expand across the contiguous non-context block around the target
-    let mut start = target;
+    // Expand across the contiguous non-context block around the selection
+    let mut start = selection_start;
     while start > 0 && rows[start - 1].kind != RowKind::Context {
         start -= 1;
     }
-    let mut end = target;
+    let mut end = selection_end;
     while end + 1 < rows.len() && rows[end + 1].kind != RowKind::Context {
         end += 1;
     }
     let start = start.saturating_sub(EXCERPT_CONTEXT);
     let end = (end + EXCERPT_CONTEXT).min(rows.len() - 1);
 
-    // Keep the target inside the window even when the cap trims it
+    // Keep the selection start inside the window when the cap trims it
     let (start, end) = if end - start + 1 > EXCERPT_MAX_LINES {
-        let half = EXCERPT_MAX_LINES / 2;
-        let s = target.saturating_sub(half).max(start);
+        let s = selection_start.saturating_sub(EXCERPT_CONTEXT).max(start);
         (s, (s + EXCERPT_MAX_LINES - 1).min(end))
     } else {
         (start, end)
@@ -528,7 +554,12 @@ pub fn excerpt(rows: &[AlignedRow], target: usize) -> String {
 
     let mut lines = Vec::new();
     for (index, row) in rows[start..=end].iter().enumerate() {
-        let marker = if start + index == target { ">" } else { " " };
+        let absolute = start + index;
+        let marker = if (selection_start..=selection_end).contains(&absolute) {
+            ">"
+        } else {
+            " "
+        };
         match row.kind {
             RowKind::Context => {
                 if let Some((_, text)) = &row.new {
@@ -572,20 +603,15 @@ mod tests {
         let rows = align("a\nb\nc\n", "a\nB\nc\n");
         let temp = tempfile::tempdir().unwrap();
         let mut s = session(temp.path());
-        let payload = s.build_payload(
-            FeedbackKind::Question,
-            "src\\lib.rs",
-            &rows[1],
-            &rows,
-            1,
-            "why?",
-        );
+        let payload = s.build_payload(FeedbackKind::Question, "src\\lib.rs", &rows, 1, 1, "why?");
 
         assert_eq!(payload.version, 1);
         assert_eq!(payload.kind, "question");
         assert_eq!(payload.file, "src/lib.rs");
         assert_eq!(payload.old_line, Some(2));
         assert_eq!(payload.new_line, Some(2));
+        assert_eq!(payload.old_range, Some([2, 2]));
+        assert_eq!(payload.new_range, Some([2, 2]));
         assert!(payload.hunk_text.contains("- b"));
         assert!(payload.hunk_text.contains("+ B"));
         assert!(payload.reply_file.ends_with(".tssdiff/replies.jsonl"));
@@ -609,13 +635,39 @@ mod tests {
             .position(|r| r.kind != RowKind::Context)
             .unwrap();
 
-        let text = excerpt(&rows, target);
+        let text = excerpt(&rows, target, target);
         assert!(text.contains(">- line50"));
         assert!(text.contains(">+ changed50"));
         // 3 context each side + the change
         assert!(text.lines().count() <= EXCERPT_MAX_LINES);
         assert!(text.contains("   line47"));
         assert!(text.contains("   line53"));
+    }
+
+    #[test]
+    fn test_range_selection_payload_and_excerpt() {
+        // Rows: ctx(a), modified(b->B), added(C), ctx(z)
+        let rows = align("a\nb\nz\n", "a\nB\nC\nz\n");
+        let temp = tempfile::tempdir().unwrap();
+        let mut s = session(temp.path());
+
+        // Select the whole changed block (rows 1..=2)
+        let payload = s.build_payload(FeedbackKind::Comment, "f.rs", &rows, 1, 2, "range");
+        assert_eq!(payload.old_line, Some(2));
+        assert_eq!(payload.new_line, Some(2));
+        assert_eq!(payload.old_range, Some([2, 2]));
+        assert_eq!(payload.new_range, Some([2, 3]));
+
+        // Every selected row is marked in the excerpt
+        let marked = payload
+            .hunk_text
+            .lines()
+            .filter(|line| line.starts_with('>'))
+            .count();
+        assert!(marked >= 3, "got:\n{}", payload.hunk_text);
+        assert!(payload.hunk_text.contains(">+ C"));
+        // Context outside the selection is unmarked
+        assert!(payload.hunk_text.contains("   a"));
     }
 
     #[test]
@@ -716,7 +768,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let rows = align("a\n", "b\n");
         let mut s = session(temp.path());
-        let payload = s.build_payload(FeedbackKind::Comment, "f.rs", &rows[0], &rows, 0, "note");
+        let payload = s.build_payload(FeedbackKind::Comment, "f.rs", &rows, 0, 0, "note");
 
         let config = AgentConfig {
             sink: SinkKind::File,
@@ -741,16 +793,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let rows = align("a\n", "b\n");
         let mut s = session(temp.path());
-        let payload =
-            s.build_payload(FeedbackKind::Question, "f.rs", &rows[0], &rows, 0, "why?");
+        let payload = s.build_payload(FeedbackKind::Question, "f.rs", &rows, 0, 0, "why?");
         let text = format_markdown(&payload);
         assert!(text.contains("## Question"));
         assert!(text.contains("```diff"));
         assert!(text.contains("replies.jsonl"));
         assert!(text.contains("reply_to"));
 
-        let comment =
-            s.build_payload(FeedbackKind::Comment, "f.rs", &rows[0], &rows, 0, "nit");
+        let comment = s.build_payload(FeedbackKind::Comment, "f.rs", &rows, 0, 0, "nit");
         let text = format_markdown(&comment);
         assert!(text.contains("## Review comment"));
         assert!(!text.contains("replies.jsonl"));

@@ -148,6 +148,7 @@ struct App {
     // Agent feedback (c key): line cursor, input box, and reply notes
     agent_session: AgentSession,
     comment_cursor: Option<usize>, // Display-row index; Some = comment mode active
+    comment_anchor: Option<usize>, // v key: range selection anchor (display-row index)
     comment_input_mode: bool,      // Comment text box visibility
     comment_text: String,          // Comment being typed
     comment_kind: FeedbackKind,    // Comment vs Question (Tab toggles)
@@ -256,6 +257,7 @@ impl App {
                     .unwrap_or_default(),
             ),
             comment_cursor: None,
+            comment_anchor: None,
             comment_input_mode: false,
             comment_text: String::new(),
             comment_kind: FeedbackKind::Comment,
@@ -799,8 +801,24 @@ impl App {
 
     fn exit_comment_mode(&mut self) {
         self.comment_cursor = None;
+        self.comment_anchor = None;
         self.comment_input_mode = false;
         self.comment_text.clear();
+    }
+
+    /// v in comment mode: drop or lift the range-selection anchor
+    fn toggle_comment_anchor(&mut self) {
+        self.comment_anchor = match self.comment_anchor {
+            Some(_) => None,
+            None => self.comment_cursor,
+        };
+    }
+
+    /// Selected display-row span: anchor..cursor, or just the cursor
+    fn comment_selection(&self) -> Option<(usize, usize)> {
+        let cursor = self.comment_cursor?;
+        let anchor = self.comment_anchor.unwrap_or(cursor);
+        Some((anchor.min(cursor), anchor.max(cursor)))
     }
 
     /// Move the comment cursor by whole diff rows, skipping gap markers
@@ -865,11 +883,22 @@ impl App {
             self.warning_message = Some("Comment is empty".to_string());
             return;
         }
-        let Some(cursor) = self.comment_cursor else {
+        let Some((span_start, span_end)) = self.comment_selection() else {
             return;
         };
-        let Some(side_by_side::DisplayRow::Row(row_index)) =
-            self.display_rows.get(cursor).copied()
+        // Row indices covered by the selected display span (rows are
+        // spliced in ascending order, so first/last bound the range)
+        let selected_rows: Vec<usize> = self
+            .display_rows
+            .get(span_start..=span_end.min(self.display_rows.len().saturating_sub(1)))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|entry| match entry {
+                side_by_side::DisplayRow::Row(index) => Some(*index),
+                _ => None,
+            })
+            .collect();
+        let (Some(&first_row), Some(&last_row)) = (selected_rows.first(), selected_rows.last())
         else {
             return;
         };
@@ -883,9 +912,9 @@ impl App {
         let payload = self.agent_session.build_payload(
             self.comment_kind,
             &file,
-            &rows[row_index],
             &rows,
-            row_index,
+            first_row,
+            last_row,
             &text,
         );
         let result = self.agent_session.send(&self.config.agent, &payload);
@@ -2158,7 +2187,12 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                     // Comment mode: the line cursor owns navigation keys
                     if app.comment_cursor.is_some() {
                         match key.code {
+                            // Esc lifts a range anchor first, then leaves
+                            KeyCode::Esc if app.comment_anchor.is_some() => {
+                                app.comment_anchor = None
+                            }
                             KeyCode::Esc | KeyCode::Char('q') => app.exit_comment_mode(),
+                            KeyCode::Char('v') => app.toggle_comment_anchor(),
                             KeyCode::Down | KeyCode::Char('j') => app.comment_cursor_move(1, 1),
                             KeyCode::Up | KeyCode::Char('k') => app.comment_cursor_move(-1, 1),
                             KeyCode::Char('d') | KeyCode::PageDown => {
@@ -2895,6 +2929,31 @@ mod tests {
             side_by_side::DisplayRow::Note { note: 0, line: 0 }
         )));
         assert!(app.warning_message.as_deref().unwrap().contains("sent"));
+    }
+
+    #[test]
+    fn test_range_selection_sends_spans() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = app_with_rows(temp.path());
+        app.config.agent.sink = crate::config::SinkKind::File;
+
+        app.enter_comment_mode();
+        // Anchor on the first row, extend to the last
+        app.toggle_comment_anchor();
+        app.comment_cursor_move(1, 2);
+        assert_eq!(app.comment_selection(), Some((0, 2)));
+
+        app.comment_text = "whole block".to_string();
+        app.send_comment();
+
+        let outbox = temp.path().join(".tssdiff").join("outbox.jsonl");
+        let content = std::fs::read_to_string(outbox).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(payload["new_line"], 1);
+        assert_eq!(payload["new_range"][0], 1);
+        assert_eq!(payload["new_range"][1], 3);
+        assert_eq!(payload["old_range"][1], 3);
+        assert!(app.comment_anchor.is_none());
     }
 
     #[test]

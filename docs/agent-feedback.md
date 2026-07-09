@@ -7,15 +7,19 @@ nothing about any specific agent harness.
 
 ## UX
 
-1. Press `c` in the side-by-side view: a line cursor appears.
+1. Press `c` in the side-by-side or after-only view: a line cursor
+   appears.
 2. Move it with `j`/`k` (`d`/`u`: 10 lines, `g`/`G`: first/last).
+   `v` drops a range anchor: moving then selects multiple lines
+   (Esc lifts the anchor).
 3. Press `Enter` to open the input box, type your text.
 4. `Tab` toggles the kind: **Comment** (a remark) or **Question**
    (expects a reply).
 5. `Enter` sends through the configured sink; your own text immediately
    appears as an inline note beneath the line (sent marker).
 6. When an agent appends a reply to the reply file, it shows up inline
-   within about a second.
+   within about a second, wrapped to the pane width. Long replies fold
+   to a few lines; `n` expands them.
 
 Notes are session-scoped: they live in memory, and reply entries left
 by previous sessions are ignored on startup.
@@ -69,9 +73,14 @@ One JSON document per send:
 - `repo`: absolute repository root, forward slashes.
 - `file`: repository-relative path, forward slashes.
 - `old_line` / `new_line`: 1-based; either may be null (a deleted line
-  has no `new_line`, an added line no `old_line`).
-- `hunk_text`: unified-style excerpt of the change; the selected line
-  is marked with a leading `>`.
+  has no `new_line`, an added line no `old_line`). For multi-line
+  selections these are the first selected line on each side.
+- `old_range` / `new_range`: inclusive `[start, end]` spans of the
+  selection per side; omitted when that side has no selected lines.
+  Single-line selections have `start == end`. (Additive since the
+  initial v1 - consumers ignoring unknown fields are unaffected.)
+- `hunk_text`: unified-style excerpt of the change; selected lines
+  are marked with a leading `>`.
 - `reply_file`: absolute path agents should append reply lines to.
 - `timestamp`: unix epoch seconds.
 

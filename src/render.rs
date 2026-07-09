@@ -287,7 +287,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         entry("C", "commit staged changes"),
         entry("o", "open file in editor"),
         entry("r", "reload diffs"),
-        entry("c", "comment / question to agent (side-by-side)"),
+        entry("c", "comment / question to agent (v: range)"),
         entry("n", "expand / collapse long agent notes"),
         Line::default(),
         section(" Mouse"),
@@ -818,10 +818,13 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
     };
 
     let cursor_bg = Style::default().bg(app.theme.colors.tree_selected_bg.0);
+    let selection = app.comment_selection();
     let mut old_lines: Vec<Line> = Vec::with_capacity(end - start);
     let mut new_lines: Vec<Line> = Vec::with_capacity(end - start);
     for (offset, entry) in display[start..end].iter().enumerate() {
-        let is_cursor = app.comment_cursor == Some(start + offset);
+        let absolute = start + offset;
+        let is_cursor =
+            selection.is_some_and(|(span_start, span_end)| (span_start..=span_end).contains(&absolute));
         match entry {
             DisplayRow::Row(index) => {
                 let row = &rows[*index];
@@ -854,7 +857,7 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let after_title = if app.comment_cursor.is_some() {
-        " After - [j/k: line, Enter: comment, Esc: back]"
+        " After - [j/k: line, v: range, Enter: comment, Esc: back]"
     } else if after_only {
         " After (full width) - [v: unified, c: comment]"
     } else if app.condensed {
