@@ -215,6 +215,18 @@ pub fn render_commit_input(f: &mut Frame, area: Rect, app: &App) {
             .style(Style::default().fg(app.theme.colors.border_focused.0)),
     );
     f.render_widget(input, popup);
+    place_input_cursor(f, popup, &app.commit_message);
+}
+
+/// Park the terminal cursor at the text insertion point so IME
+/// composition windows anchor to the right cell. ratatui hides the
+/// cursor unless a frame sets it, and IMEs then draw the preedit at a
+/// stale position (outside the input box).
+fn place_input_cursor(f: &mut Frame, popup: Rect, text: &str) {
+    // Border + the leading space before the text
+    let text_width = Line::from(format!(" {text}")).width() as u16;
+    let x = (popup.x + 1 + text_width).min(popup.x + popup.width.saturating_sub(2));
+    f.set_cursor_position((x, popup.y + 1));
 }
 
 pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
@@ -726,6 +738,7 @@ pub fn render_search_box(f: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(app.theme.colors.border.0)
     };
 
+    let text_width = Line::from(search_text.as_str()).width() as u16;
     let search_box = Paragraph::new(search_text)
         .block(
             Block::default()
@@ -736,6 +749,12 @@ pub fn render_search_box(f: &mut Frame, area: Rect, app: &App) {
         .style(search_style);
 
     f.render_widget(search_box, area);
+
+    // Anchor the IME composition window at the typing position
+    if app.search_input_mode {
+        let x = (area.x + 1 + text_width).min(area.x + area.width.saturating_sub(2));
+        f.set_cursor_position((x, area.y + 1));
+    }
 }
 
 pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
@@ -990,6 +1009,7 @@ pub fn render_comment_input(f: &mut Frame, area: Rect, app: &App) {
             .style(Style::default().fg(app.theme.colors.border_focused.0)),
     );
     f.render_widget(input, popup);
+    place_input_cursor(f, popup, &app.comment_text);
 }
 
 pub fn render_warning_bar(f: &mut Frame, area: Rect, app: &App) {
