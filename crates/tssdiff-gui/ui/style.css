@@ -164,6 +164,7 @@ kbd {
   flex: 0 0 46%; min-height: 0;
   border-bottom: 1px solid var(--line);
 }
+.commit-pane[hidden] { display: none; }
 .commit-list { overflow-y: auto; flex: 1; padding: 4px 0; }
 .citem {
   padding: 4px 14px 4px 11px; cursor: pointer;
@@ -359,6 +360,24 @@ kbd {
 .keycard tr:first-child td { border-top: none; }
 .keycard td.keys { width: 45%; white-space: nowrap; }
 .keycard td.keys .alt { color: var(--muted); font-size: 11px; margin-left: 5px; }
+
+/* ---------- context menu ---------- */
+.ctxmenu {
+  position: fixed; z-index: 70; min-width: 230px; max-width: 340px;
+  background: var(--chrome); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: var(--shadow); padding: 4px; font-family: var(--ui);
+}
+.ctx-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  width: 100%; text-align: left; background: none; border: none;
+  padding: 6px 12px; border-radius: 5px; font-size: 12.5px; color: var(--ink);
+  cursor: pointer; font-family: var(--ui);
+}
+.ctx-item > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-item:hover:not(:disabled), .ctx-item:focus-visible { background: var(--accent-soft); outline: none; }
+.ctx-item:disabled { color: var(--muted); opacity: 0.6; cursor: default; }
+.ctx-item kbd { font-size: 10px; flex: none; }
+.ctx-sep { border-top: 1px solid var(--line); margin: 4px 8px; }
 
 /* ---------- toast ---------- */
 .toast {

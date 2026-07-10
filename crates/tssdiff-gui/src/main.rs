@@ -126,6 +126,95 @@ fn mode_from(mode: &str) -> OperationMode {
     }
 }
 
+/// Absolute path of a repo-relative file (cwd is the repo root)
+fn abs_repo_path(path: &str) -> Result<PathBuf, String> {
+    let abs = std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .join(path);
+    Ok(abs)
+}
+
+#[tauri::command]
+fn copy_text(text: String) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_in_editor(path: String, state: State<AppState>) -> Result<(), String> {
+    let abs = abs_repo_path(&path)?;
+    if !abs.exists() {
+        return Err(format!("ファイルが存在しません: {path}"));
+    }
+    let configured = state
+        .config
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.editor.clone())
+        .unwrap_or_default();
+    let editor = if configured.trim().is_empty() {
+        std::env::var("EDITOR").unwrap_or_default()
+    } else {
+        configured
+    };
+    if editor.trim().is_empty() {
+        return open_with_default(&abs);
+    }
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap();
+    std::process::Command::new(program)
+        .args(parts)
+        .arg(&abs)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("エディタを起動できません ({program}): {e}"))
+}
+
+/// Open with the OS-associated application
+fn open_with_default(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+fn reveal_in_explorer(path: String) -> Result<(), String> {
+    let abs = abs_repo_path(&path)?;
+    #[cfg(windows)]
+    {
+        let select = format!("/select,{}", abs.display().to_string().replace('/', "\\"));
+        std::process::Command::new("explorer")
+            .arg(select)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let parent = abs.parent().unwrap_or(&abs).to_path_buf();
+        std::process::Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// TSSDIFF_GIT_BACKEND=cli|pure|auto overrides the configured backend
 fn backend_kind_override() -> Option<GitBackendKind> {
     match std::env::var("TSSDIFF_GIT_BACKEND")
@@ -454,7 +543,10 @@ fn main() {
             load_commits,
             load_diff,
             send_feedback,
-            poll_notes
+            poll_notes,
+            copy_text,
+            open_in_editor,
+            reveal_in_explorer
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

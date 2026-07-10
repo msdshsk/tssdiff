@@ -580,6 +580,172 @@ $('popText').addEventListener('keydown', (e) => {
   }
 });
 
+/* ---------- context menu ---------- */
+const ctxMenu = $('ctxMenu');
+
+function hideCtxMenu() {
+  ctxMenu.hidden = true;
+  ctxMenu.innerHTML = '';
+}
+
+function showCtxMenu(items, x, y) {
+  ctxMenu.innerHTML = '';
+  for (const it of items) {
+    if (it === '-') {
+      const sep = document.createElement('div');
+      sep.className = 'ctx-sep';
+      ctxMenu.appendChild(sep);
+      continue;
+    }
+    const btn = document.createElement('button');
+    btn.className = 'ctx-item';
+    btn.disabled = !!it.disabled;
+    btn.setAttribute('role', 'menuitem');
+    btn.innerHTML = `<span>${esc(it.label)}</span>` + (it.kbd ? `<kbd>${esc(it.kbd)}</kbd>` : '');
+    btn.addEventListener('click', () => {
+      hideCtxMenu();
+      it.action();
+    });
+    ctxMenu.appendChild(btn);
+  }
+  ctxMenu.style.left = x + 'px';
+  ctxMenu.style.top = y + 'px';
+  ctxMenu.hidden = false;
+  const rect = ctxMenu.getBoundingClientRect();
+  ctxMenu.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
+  ctxMenu.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
+}
+
+async function copyText(text, what) {
+  try {
+    await invoke('copy_text', { text });
+    toast(what + ' をコピーしました');
+  } catch (e) {
+    toast(String(e));
+  }
+}
+
+function openInEditor(path) {
+  if (!path) return;
+  invoke('open_in_editor', { path }).catch((e) => toast(String(e)));
+}
+
+function diffRowMenu(drow) {
+  const idx = Number(drow.dataset.idx);
+  const r = state.rows[idx];
+  if (!r) return generalMenu();
+  const range = selRange();
+  const inSel = range && idx >= range[0] && idx <= range[1];
+  const lineNo = r.new_no ?? r.old_no;
+  const lineText = (r.new || r.old || []).map((s) => s.t).join('');
+  const osSelection = String(window.getSelection() || '');
+  const items = [
+    {
+      label: inSel && range[0] !== range[1] ? '選択範囲にコメント…' : 'この行にコメント…',
+      kbd: 'C',
+      action: () => {
+        if (!inSel) {
+          state.sel = { start: idx, end: idx };
+          applySelection();
+        }
+        openPopover();
+      },
+    },
+    '-',
+  ];
+  if (osSelection.trim()) {
+    items.push({ label: '選択テキストをコピー', action: () => copyText(osSelection, 'テキスト') });
+  }
+  items.push({ label: '行テキストをコピー', action: () => copyText(lineText, '行') });
+  items.push({
+    label: `${state.current}:${lineNo} をコピー`,
+    action: () => copyText(`${state.current}:${lineNo}`, '位置'),
+  });
+  items.push('-');
+  items.push({ label: 'エディタで開く', action: () => openInEditor(state.current) });
+  if (range) items.push({ label: '選択を解除', kbd: 'Esc', action: clearSelection });
+  return items;
+}
+
+function fileMenu(path) {
+  return [
+    { label: 'diff を表示', action: () => selectFile(path) },
+    { label: 'エディタで開く', action: () => openInEditor(path) },
+    '-',
+    { label: '相対パスをコピー', action: () => copyText(path, 'パス') },
+    {
+      label: 'エクスプローラーで表示',
+      action: () => invoke('reveal_in_explorer', { path }).catch((e) => toast(String(e))),
+    },
+  ];
+}
+
+function commitMenu(citem) {
+  const hash = citem.dataset.commit;
+  if (!hash) return generalMenu();
+  const subject = (state.commits.find((c) => c.hash === hash) || {}).subject || '';
+  return [
+    { label: 'このコミットを表示', action: () => citem.click() },
+    '-',
+    { label: `ハッシュ ${hash} をコピー`, action: () => copyText(hash, 'ハッシュ') },
+    { label: '件名をコピー', action: () => copyText(subject, '件名') },
+  ];
+}
+
+function generalMenu() {
+  return [
+    { label: '更新', kbd: 'F5', action: refreshAll, disabled: !state.repo },
+    {
+      label: state.afterOnly ? 'Side-by-side 表示に切替' : 'After-only 表示に切替',
+      kbd: state.afterOnly ? 'Ctrl+1' : 'Ctrl+2',
+      action: () => setView(!state.afterOnly),
+      disabled: !state.current,
+    },
+    {
+      label: 'ファイルツリーの表示/非表示',
+      kbd: 'Ctrl+B',
+      action: () => $('treePane').classList.toggle('hidden'),
+    },
+    '-',
+    { label: 'リポジトリを開く…', kbd: 'Ctrl+O', action: pickRepo },
+    { label: 'ショートカット一覧', kbd: '?', action: openHelp },
+  ];
+}
+
+function menuItemsFor(e) {
+  const t = e.target;
+  const note = t.closest('.note-entry');
+  if (note) {
+    const body = (note.querySelector('.nbody') || {}).textContent || '';
+    return [{ label: '注釈をコピー', action: () => copyText(body, '注釈') }];
+  }
+  const drow = t.closest('.drow');
+  if (drow) return diffRowMenu(drow);
+  const citem = t.closest('.citem');
+  if (citem) return commitMenu(citem);
+  const titem = t.closest('.titem[data-file]');
+  if (titem) return fileMenu(titem.dataset.file);
+  return generalMenu();
+}
+
+document.addEventListener('contextmenu', (e) => {
+  const t = e.target;
+  // native menu stays available inside text inputs (paste, IME)
+  if (t.closest('input, textarea')) return;
+  e.preventDefault();
+  if (t.closest('.ctxmenu')) return;
+  hideCtxMenu();
+  const items = menuItemsFor(e);
+  if (items.length) showCtxMenu(items, e.clientX, e.clientY);
+});
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.ctxmenu')) hideCtxMenu();
+});
+window.addEventListener('blur', hideCtxMenu);
+window.addEventListener('resize', hideCtxMenu);
+$('diffScroll').addEventListener('scroll', hideCtxMenu);
+
 /* ---------- reply polling (Q4: inline + badge + in-app toast) ---------- */
 setInterval(async () => {
   if (!state.repo) return;
@@ -797,7 +963,8 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     overlay.classList.contains('open') ? closeHelp() : openHelp();
   } else if (e.key === 'Escape') {
-    if (overlay.classList.contains('open')) closeHelp();
+    if (!ctxMenu.hidden) hideCtxMenu();
+    else if (overlay.classList.contains('open')) closeHelp();
     else if (!$('popover').hidden) hidePopover();
     else clearSelection();
   } else if (e.key === 'F5') {

@@ -5441,6 +5441,7 @@ name = "tssdiff-gui"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "serde",
  "serde_json",
  "tauri",

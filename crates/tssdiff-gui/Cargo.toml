@@ -20,6 +20,7 @@ tauri-plugin-dialog = "2"
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+arboard = { version = "3", default-features = false }
 
 [[bin]]
 name = "tssdiff-gui"
