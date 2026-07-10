@@ -1,4 +1,4 @@
-use crate::cli::OperationMode;
+use crate::mode::OperationMode;
 use crate::parser::FileDiff;
 use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
@@ -25,6 +25,7 @@ pub struct GraphRow {
 }
 
 /// Git command executor for getting diff data
+#[derive(Default)]
 pub struct GitExecutor;
 
 impl GitExecutor {
@@ -68,9 +69,6 @@ impl GitExecutor {
                     self.execute_regular_diff(target1, target2)
                 }
             }
-            OperationMode::Completions { .. } => {
-                Err(anyhow!("Completions mode should not call get_diff"))
-            }
             OperationMode::Invalid { reason } => Err(anyhow!("Invalid operation mode: {}", reason)),
         }
     }
@@ -105,9 +103,6 @@ impl GitExecutor {
                     Ok(vec![target1.clone(), target2.clone()])
                 }
             }
-            OperationMode::Completions { .. } => Err(anyhow!(
-                "Completions mode should not call get_changed_files"
-            )),
             OperationMode::Invalid { reason } => Err(anyhow!("Invalid operation mode: {}", reason)),
         }
     }
@@ -148,9 +143,6 @@ impl GitExecutor {
                     // For file comparison, assume the file_path is one of the targets
                     self.execute_regular_diff(target1, target2)
                 }
-            }
-            OperationMode::Completions { .. } => {
-                Err(anyhow!("Completions mode should not call get_file_diff"))
             }
             OperationMode::Invalid { reason } => Err(anyhow!("Invalid operation mode: {}", reason)),
         }
@@ -276,9 +268,7 @@ impl GitExecutor {
                     ))
                 }
             }
-            OperationMode::Completions { .. } | OperationMode::Invalid { .. } => {
-                Err(anyhow!("Operation mode has no file versions"))
-            }
+            OperationMode::Invalid { .. } => Err(anyhow!("Operation mode has no file versions")),
         }
     }
 

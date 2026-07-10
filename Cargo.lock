@@ -1292,17 +1292,29 @@ version = "0.2.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
- "arboard",
  "clap",
  "clap_complete",
  "crossterm 0.29.0",
- "dirs",
  "ratatui",
+ "serde_json",
+ "strip-ansi-escapes",
+ "tempfile",
+ "tssdiff-core",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "tssdiff-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "clap",
+ "dirs",
  "serde",
  "serde_json",
  "serde_yaml",
  "similar",
- "strip-ansi-escapes",
  "syntect",
  "tempfile",
  "unicode-width 0.2.0",

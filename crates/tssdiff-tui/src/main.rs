@@ -1,32 +1,12 @@
-mod agent;
 mod cli;
-mod config;
-mod diff;
-mod git;
-mod highlight;
-mod icons;
-mod parser;
-mod persistence;
 mod render;
-mod side_by_side;
-mod theme;
-mod tree;
 
-use crate::agent::{AgentSession, FeedbackKind};
-use crate::cli::{Cli, OperationMode};
-use crate::config::{Config, DiffCommandType};
-use crate::git::{CommitInfo, GitExecutor, GraphRow};
-use crate::highlight::HighlightedLines;
-use crate::parser::{DiffFileKey, DiffParser, FileDiff};
-use crate::persistence::PersistenceManager;
+use crate::cli::{Cli, Commands};
 use crate::render::{
     render_comment_input, render_commit_graph, render_commit_input, render_commit_list,
-    render_diff_content, render_file_list, render_help_overlay, render_menu_bar,
-    render_search_box, render_side_by_side, render_status_line, render_warning_bar,
+    render_diff_content, render_file_list, render_help_overlay, render_menu_bar, render_search_box,
+    render_side_by_side, render_status_line, render_warning_bar,
 };
-use crate::side_by_side::AlignedRow;
-use crate::theme::Theme;
-use crate::tree::{FileTreeBuilder, FileTreeItem};
 use anyhow::Result;
 use crossterm::{
     event::{
@@ -44,6 +24,37 @@ use ratatui::{
 };
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
+use tssdiff_core::agent::{self, AgentSession, FeedbackKind};
+use tssdiff_core::config::{self, Config, DiffCommandType};
+use tssdiff_core::git::{CommitInfo, GitExecutor, GraphRow};
+use tssdiff_core::mode::OperationMode;
+use tssdiff_core::parser::{DiffFileKey, DiffParser, FileDiff};
+use tssdiff_core::persistence::PersistenceManager;
+use tssdiff_core::side_by_side::{self, AlignedRow};
+use tssdiff_core::theme::Theme;
+use tssdiff_core::tree::{FileTreeBuilder, FileTreeItem};
+use tssdiff_core::{highlight, icons};
+
+/// Syntax colors per side, mapped to ratatui for rendering
+type HighlightedLines = Vec<Vec<(ratatui::style::Color, String)>>;
+
+/// Map core highlight segments (sRGB or default) onto ratatui colors
+fn to_tui_highlight(lines: highlight::HighlightedLines) -> HighlightedLines {
+    lines
+        .into_iter()
+        .map(|line| {
+            line.into_iter()
+                .map(|(color, text)| {
+                    let color = match color {
+                        Some((r, g, b)) => ratatui::style::Color::Rgb(r, g, b),
+                        None => ratatui::style::Color::Reset,
+                    };
+                    (color, text)
+                })
+                .collect()
+        })
+        .collect()
+}
 
 // Constants for external tool integration
 const DEFAULT_TERMINAL_HEIGHT: &str = "50";
@@ -155,8 +166,8 @@ struct App {
     last_diff_height: u16,         // Diff pane rows from the last frame, for cursor scrolling
     file_pane_hidden: bool,        // z key: hide the left pane, diff takes the full width
     wrapped_notes: Vec<Vec<String>>, // Notes wrapped (and folded) to the note pane width
-    notes_expanded: bool,            // n key: show long notes in full
-    last_note_wrap_width: u16,       // Note pane content width from the last frame
+    notes_expanded: bool,          // n key: show long notes in full
+    last_note_wrap_width: u16,     // Note pane content width from the last frame
 }
 
 impl App {
@@ -505,7 +516,7 @@ impl App {
     fn preview_history_entry(&mut self) {
         let executor = GitExecutor::new();
         let preview = if self.commit_index == 0 {
-            let bullet = crate::icons::bullet(self.config.icon_mode);
+            let bullet = icons::bullet(self.config.icon_mode);
             executor.get_status_summary().map(|status| {
                 format!("{bullet} Working tree changes\n\n{status}\nEnter/click: open")
             })
@@ -635,7 +646,8 @@ impl App {
                     &new_text,
                     &self.config.syntax_theme,
                     Some(cap),
-                );
+                )
+                .map(|(old_hl, new_hl)| (to_tui_highlight(old_hl), to_tui_highlight(new_hl)));
             }
             self.aligned_rows = Some(rows);
         }
@@ -713,7 +725,7 @@ impl App {
             .len()
             .max(3);
         let icon_width = match self.config.icon_mode {
-            crate::config::IconMode::Ascii => 1,
+            config::IconMode::Ascii => 1,
             _ => 2,
         };
         // Pane width minus the line-number gutter the notes align with
@@ -1905,19 +1917,19 @@ impl App {
 fn main() -> Result<()> {
     // Parse command line arguments
     let cli = Cli::parse_args();
+
+    // Shell completions never enter mode dispatch
+    if let Some(Commands::Completions { shell }) = &cli.command {
+        generate_completions(*shell);
+        return Ok(());
+    }
+
     let operation_mode = cli.get_operation_mode();
 
-    // Handle special modes first
-    match &operation_mode {
-        OperationMode::Completions { shell } => {
-            generate_completions(*shell);
-            return Ok(());
-        }
-        OperationMode::Invalid { reason } => {
-            eprintln!("Error: {reason}");
-            std::process::exit(1);
-        }
-        _ => {}
+    // Handle invalid arguments first
+    if let OperationMode::Invalid { reason } = &operation_mode {
+        eprintln!("Error: {reason}");
+        std::process::exit(1);
     }
 
     // Load configuration
@@ -2198,9 +2210,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                             KeyCode::Char('d') | KeyCode::PageDown => {
                                 app.comment_cursor_move(1, 10)
                             }
-                            KeyCode::Char('u') | KeyCode::PageUp => {
-                                app.comment_cursor_move(-1, 10)
-                            }
+                            KeyCode::Char('u') | KeyCode::PageUp => app.comment_cursor_move(-1, 10),
                             KeyCode::Char('g') => app.comment_cursor_jump(false),
                             KeyCode::Char('G') => app.comment_cursor_jump(true),
                             KeyCode::Enter | KeyCode::Char('c') => {
@@ -2390,9 +2400,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                         KeyCode::Char('z') if !app.search_input_mode => app.toggle_file_pane(),
 
                         // Expand/collapse long agent notes
-                        KeyCode::Char('n') if !app.search_input_mode => {
-                            app.toggle_notes_expanded()
-                        }
+                        KeyCode::Char('n') if !app.search_input_mode => app.toggle_notes_expanded(),
 
                         // Horizontal scrolling (disabled only when typing in search)
                         KeyCode::Char('h') | KeyCode::Left if !app.search_input_mode => {
@@ -2564,10 +2572,10 @@ fn ui(f: &mut Frame, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::FileDiff;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+    use tssdiff_core::parser::FileDiff;
 
     #[test]
     fn test_app_new() {
@@ -2819,8 +2827,8 @@ mod tests {
         let backend = TestBackend::new(90, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let config = Config {
-            git: crate::config::GitConfig {
-                paging: crate::config::GitPagingConfig {
+            git: config::GitConfig {
+                paging: config::GitPagingConfig {
                     pager: "nonexistent_diff_tool_xyz".to_string(),
                     ..Default::default()
                 },
@@ -2894,7 +2902,7 @@ mod tests {
     fn test_comment_mode_send_via_file_sink() {
         let temp = tempfile::tempdir().unwrap();
         let mut app = app_with_rows(temp.path());
-        app.config.agent.sink = crate::config::SinkKind::File;
+        app.config.agent.sink = config::SinkKind::File;
 
         app.enter_comment_mode();
         assert_eq!(app.comment_cursor, Some(0));
@@ -2924,10 +2932,11 @@ mod tests {
         // Comment mode closed, own note spliced beneath the row
         assert!(app.comment_cursor.is_none());
         assert!(!app.comment_input_mode);
-        assert!(app.display_rows.iter().any(|entry| matches!(
-            entry,
-            side_by_side::DisplayRow::Note { note: 0, line: 0 }
-        )));
+        assert!(
+            app.display_rows
+                .iter()
+                .any(|entry| matches!(entry, side_by_side::DisplayRow::Note { note: 0, line: 0 }))
+        );
         assert!(app.warning_message.as_deref().unwrap().contains("sent"));
     }
 
@@ -2935,7 +2944,7 @@ mod tests {
     fn test_range_selection_sends_spans() {
         let temp = tempfile::tempdir().unwrap();
         let mut app = app_with_rows(temp.path());
-        app.config.agent.sink = crate::config::SinkKind::File;
+        app.config.agent.sink = config::SinkKind::File;
 
         app.enter_comment_mode();
         // Anchor on the first row, extend to the last
@@ -2963,7 +2972,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = app_with_rows(temp.path());
 
-        app.agent_session.notes.push(crate::agent::Note {
+        app.agent_session.notes.push(tssdiff_core::agent::Note {
             reply_to: None,
             file: "test.rs".to_string(),
             old_line: None,
@@ -3020,7 +3029,7 @@ mod tests {
             .map(|i| format!("answer line number {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        app.agent_session.notes.push(crate::agent::Note {
+        app.agent_session.notes.push(tssdiff_core::agent::Note {
             reply_to: None,
             file: "test.rs".to_string(),
             old_line: None,

@@ -1,4 +1,3 @@
-use ratatui::style::Color;
 use std::path::Path;
 use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
@@ -9,8 +8,11 @@ use syntect::util::LinesWithEndings;
 /// Fallback when the configured theme name is unknown
 const DEFAULT_THEME: &str = "base16-ocean.dark";
 
+/// sRGB foreground of a highlighted segment; None = default text color
+pub type SegmentColor = Option<(u8, u8, u8)>;
+
 /// One display line as (foreground color, text) segments
-pub type HighlightedLines = Vec<Vec<(Color, String)>>;
+pub type HighlightedLines = Vec<Vec<(SegmentColor, String)>>;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
@@ -92,7 +94,7 @@ fn highlight_text(
                     .map(|(style, segment)| {
                         let fg = style.foreground;
                         (
-                            Color::Rgb(fg.r, fg.g, fg.b),
+                            Some((fg.r, fg.g, fg.b)),
                             segment
                                 .trim_end_matches('\n')
                                 .trim_end_matches('\r')
@@ -102,7 +104,7 @@ fn highlight_text(
                     .collect(),
                 // A parse hiccup on one line should not lose its text
                 Err(_) => vec![(
-                    Color::Reset,
+                    None,
                     line.trim_end_matches('\n')
                         .trim_end_matches('\r')
                         .to_string(),

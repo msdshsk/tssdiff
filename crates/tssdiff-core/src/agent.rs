@@ -176,9 +176,8 @@ impl AgentSession {
             .iter()
             .filter_map(|row| row.new.as_ref().map(|(n, _)| *n))
             .collect();
-        let span = |lines: &[usize]| -> Option<[usize; 2]> {
-            Some([*lines.first()?, *lines.last()?])
-        };
+        let span =
+            |lines: &[usize]| -> Option<[usize; 2]> { Some([*lines.first()?, *lines.last()?]) };
 
         FeedbackPayload {
             version: PAYLOAD_VERSION,
@@ -421,7 +420,12 @@ fn send_command(config: &AgentConfig, payload: &FeedbackPayload) -> Result<Strin
         }
         let detail = stderr_text.lines().next().unwrap_or("").trim().to_string();
         let detail = if detail.is_empty() {
-            output.lines().next().unwrap_or("no output").trim().to_string()
+            output
+                .lines()
+                .next()
+                .unwrap_or("no output")
+                .trim()
+                .to_string()
         } else {
             detail
         };
@@ -618,8 +622,17 @@ mod tests {
 
         let json = serde_json::to_string(&payload).unwrap();
         for key in [
-            "version", "id", "kind", "repo", "file", "old_line", "new_line", "hunk_text",
-            "comment", "reply_file", "timestamp",
+            "version",
+            "id",
+            "kind",
+            "repo",
+            "file",
+            "old_line",
+            "new_line",
+            "hunk_text",
+            "comment",
+            "reply_file",
+            "timestamp",
         ] {
             assert!(json.contains(&format!("\"{key}\"")), "missing {key}");
         }
@@ -724,7 +737,10 @@ mod tests {
         assert!(!s.poll_replies(), "pre-existing entries must be skipped");
         assert!(s.notes.is_empty());
 
-        let mut file = std::fs::OpenOptions::new().append(true).open(&reply).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&reply)
+            .unwrap();
         writeln!(
             file,
             "{{\"reply_to\":\"fb-1\",\"file\":\"src/a.rs\",\"new_line\":3,\"body\":\"answer\"}}"
@@ -758,7 +774,9 @@ mod tests {
         assert_eq!(s.read_offset, 0);
         // Self-ignoring directory
         assert_eq!(
-            std::fs::read_to_string(dir.join(".gitignore")).unwrap().trim(),
+            std::fs::read_to_string(dir.join(".gitignore"))
+                .unwrap()
+                .trim(),
             "*"
         );
     }

@@ -233,7 +233,8 @@ impl Default for Config {
 /// Icon set for the file tree. Nerd requires a Nerd Font patched
 /// terminal font; Emoji renders everywhere via font fallback; Ascii
 /// avoids ambiguous-width glyphs entirely for xterm-like terminals
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "lowercase")]
 pub enum IconMode {
     Nerd,

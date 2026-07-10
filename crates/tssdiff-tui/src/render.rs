@@ -1,4 +1,3 @@
-use crate::side_by_side::{AlignedRow, DisplayRow, RowKind};
 use crate::{App, LeftPane, MenuAction};
 use ansi_to_tui::IntoText;
 use ratatui::{
@@ -8,6 +7,40 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+use tssdiff_core::side_by_side::{AlignedRow, DisplayRow, RowKind};
+use tssdiff_core::theme::UiColor;
+
+/// Map the core's UI-agnostic color onto ratatui's color type
+pub(crate) trait ToRatatui {
+    fn rat(self) -> ratatui::style::Color;
+}
+
+impl ToRatatui for UiColor {
+    fn rat(self) -> ratatui::style::Color {
+        use ratatui::style::Color as C;
+        match self {
+            UiColor::Reset => C::Reset,
+            UiColor::Black => C::Black,
+            UiColor::Red => C::Red,
+            UiColor::Green => C::Green,
+            UiColor::Yellow => C::Yellow,
+            UiColor::Blue => C::Blue,
+            UiColor::Magenta => C::Magenta,
+            UiColor::Cyan => C::Cyan,
+            UiColor::Gray => C::Gray,
+            UiColor::DarkGray => C::DarkGray,
+            UiColor::LightRed => C::LightRed,
+            UiColor::LightGreen => C::LightGreen,
+            UiColor::LightYellow => C::LightYellow,
+            UiColor::LightBlue => C::LightBlue,
+            UiColor::LightMagenta => C::LightMagenta,
+            UiColor::LightCyan => C::LightCyan,
+            UiColor::White => C::White,
+            UiColor::Indexed(n) => C::Indexed(n),
+            UiColor::Rgb(r, g, b) => C::Rgb(r, g, b),
+        }
+    }
+}
 
 pub fn render_menu_bar(f: &mut Frame, area: Rect, app: &mut App) {
     app.regions.menu_items.clear();
@@ -24,7 +57,7 @@ pub fn render_menu_bar(f: &mut Frame, area: Rect, app: &mut App) {
     let mut spans = vec![Span::styled(
         brand,
         Style::default()
-            .fg(app.theme.colors.title.0)
+            .fg(app.theme.colors.title.0.rat())
             .add_modifier(Modifier::BOLD),
     )];
     let mut x = area.x + brand.len() as u16;
@@ -36,17 +69,17 @@ pub fn render_menu_bar(f: &mut Frame, area: Rect, app: &mut App) {
         );
         let label_style = if active {
             Style::default()
-                .fg(app.theme.colors.tree_selected_fg.0)
+                .fg(app.theme.colors.tree_selected_fg.0.rat())
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(app.theme.colors.text_primary.0)
+            Style::default().fg(app.theme.colors.text_primary.0.rat())
         };
 
         let text = format!("[{key}] {label}");
         let width = text.len() as u16;
         spans.push(Span::styled(
             format!("[{key}]"),
-            Style::default().fg(app.theme.colors.status_modified.0),
+            Style::default().fg(app.theme.colors.status_modified.0.rat()),
         ));
         spans.push(Span::styled(format!(" {label}"), label_style));
         spans.push(Span::raw("  "));
@@ -64,22 +97,22 @@ pub fn render_menu_bar(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let bar = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(app.theme.colors.status_bar_bg.0));
+        .style(Style::default().bg(app.theme.colors.status_bar_bg.0.rat()));
     f.render_widget(bar, area);
 }
 
 pub fn render_commit_list(f: &mut Frame, area: Rect, app: &mut App) {
     let mut items: Vec<ListItem> = Vec::with_capacity(app.commits.len() + 1);
 
-    let selected_bg = Style::default().bg(app.theme.colors.tree_selected_bg.0);
+    let selected_bg = Style::default().bg(app.theme.colors.tree_selected_bg.0.rat());
 
     // Virtual entry for the current working tree
     let working_tree_line = Line::from(Span::styled(
         format!(
             "{} Working tree",
-            crate::icons::bullet(app.config.icon_mode)
+            tssdiff_core::icons::bullet(app.config.icon_mode)
         ),
-        Style::default().fg(app.theme.colors.status_added.0),
+        Style::default().fg(app.theme.colors.status_added.0.rat()),
     ));
     items.push(
         ListItem::new(working_tree_line).style(if app.commit_index == 0 {
@@ -94,14 +127,14 @@ pub fn render_commit_list(f: &mut Frame, area: Rect, app: &mut App) {
         let line = Line::from(vec![
             Span::styled(
                 format!("{} ", commit.hash),
-                Style::default().fg(app.theme.colors.status_modified.0),
+                Style::default().fg(app.theme.colors.status_modified.0.rat()),
             ),
             Span::styled(
                 commit.subject.clone(),
                 if is_selected {
-                    Style::default().fg(app.theme.colors.tree_selected_fg.0)
+                    Style::default().fg(app.theme.colors.tree_selected_fg.0.rat())
                 } else {
-                    Style::default().fg(app.theme.colors.text_primary.0)
+                    Style::default().fg(app.theme.colors.text_primary.0.rat())
                 },
             ),
         ]);
@@ -117,9 +150,9 @@ pub fn render_commit_list(f: &mut Frame, area: Rect, app: &mut App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(" History ({} commits)", app.commits.len()))
-                .style(Style::default().fg(app.theme.colors.border_focused.0)),
+                .style(Style::default().fg(app.theme.colors.border_focused.0.rat())),
         )
-        .style(Style::default().fg(app.theme.colors.text_primary.0));
+        .style(Style::default().fg(app.theme.colors.text_primary.0.rat()));
 
     f.render_stateful_widget(list, area, &mut app.commit_list_state);
 }
@@ -144,31 +177,31 @@ pub fn render_commit_graph(f: &mut Frame, area: Rect, app: &mut App) {
             let is_selected = selected == Some(scroll + offset);
             let mut spans = vec![Span::styled(
                 row.graph.clone(),
-                Style::default().fg(app.theme.colors.tree_line.0),
+                Style::default().fg(app.theme.colors.tree_line.0.rat()),
             )];
             if let Some(ref hash) = row.hash {
                 spans.push(Span::styled(
                     format!("{hash} "),
-                    Style::default().fg(app.theme.colors.status_modified.0),
+                    Style::default().fg(app.theme.colors.status_modified.0.rat()),
                 ));
                 if !row.refs.is_empty() {
                     spans.push(Span::styled(
                         format!("{} ", row.refs),
-                        Style::default().fg(app.theme.colors.border_focused.0),
+                        Style::default().fg(app.theme.colors.border_focused.0.rat()),
                     ));
                 }
                 spans.push(Span::styled(
                     row.subject.clone(),
                     if is_selected {
-                        Style::default().fg(app.theme.colors.tree_selected_fg.0)
+                        Style::default().fg(app.theme.colors.tree_selected_fg.0.rat())
                     } else {
-                        Style::default().fg(app.theme.colors.text_primary.0)
+                        Style::default().fg(app.theme.colors.text_primary.0.rat())
                     },
                 ));
             }
             let line = Line::from(spans);
             if is_selected {
-                line.style(Style::default().bg(app.theme.colors.tree_selected_bg.0))
+                line.style(Style::default().bg(app.theme.colors.tree_selected_bg.0.rat()))
             } else {
                 line
             }
@@ -179,7 +212,7 @@ pub fn render_commit_graph(f: &mut Frame, area: Rect, app: &mut App) {
         Block::default()
             .borders(Borders::ALL)
             .title(" Graph - [click: select, again: open]")
-            .style(Style::default().fg(app.theme.colors.border.0)),
+            .style(Style::default().fg(app.theme.colors.border.0.rat())),
     );
     f.render_widget(graph, area);
 }
@@ -194,25 +227,25 @@ pub fn render_commit_input(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let cursor = match app.config.icon_mode {
-        crate::config::IconMode::Ascii => "_",
+        tssdiff_core::config::IconMode::Ascii => "_",
         _ => "▏",
     };
     f.render_widget(Clear, popup);
     let input = Paragraph::new(Line::from(vec![
         Span::styled(
             format!(" {}", app.commit_message),
-            Style::default().fg(app.theme.colors.text_primary.0),
+            Style::default().fg(app.theme.colors.text_primary.0.rat()),
         ),
         Span::styled(
             cursor,
-            Style::default().fg(app.theme.colors.border_focused.0),
+            Style::default().fg(app.theme.colors.border_focused.0.rat()),
         ),
     ]))
     .block(
         Block::default()
             .borders(Borders::ALL)
             .title(" Commit message (Enter: commit, Esc: cancel)")
-            .style(Style::default().fg(app.theme.colors.border_focused.0)),
+            .style(Style::default().fg(app.theme.colors.border_focused.0.rat())),
     );
     f.render_widget(input, popup);
     place_input_cursor(f, popup, &app.commit_message);
@@ -243,7 +276,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(
             title.to_string(),
             Style::default()
-                .fg(app.theme.colors.title.0)
+                .fg(app.theme.colors.title.0.rat())
                 .add_modifier(Modifier::BOLD),
         ))
     };
@@ -251,11 +284,11 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled(
                 format!("  {key:<16}"),
-                Style::default().fg(app.theme.colors.status_modified.0),
+                Style::default().fg(app.theme.colors.status_modified.0.rat()),
             ),
             Span::styled(
                 description.to_string(),
-                Style::default().fg(app.theme.colors.text_primary.0),
+                Style::default().fg(app.theme.colors.text_primary.0.rat()),
             ),
         ])
     };
@@ -304,7 +337,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         Block::default()
             .borders(Borders::ALL)
             .title(" Help ")
-            .style(Style::default().fg(app.theme.colors.border_focused.0)),
+            .style(Style::default().fg(app.theme.colors.border_focused.0.rat())),
     );
     f.render_widget(help, popup);
 }
@@ -321,7 +354,7 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
         .map(|(i, tree_item)| {
             let is_selected = i == app.selected_index;
             let bg_style = if is_selected {
-                Style::default().bg(app.theme.colors.tree_selected_bg.0)
+                Style::default().bg(app.theme.colors.tree_selected_bg.0.rat())
             } else {
                 Style::default()
             };
@@ -332,7 +365,7 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
             // Build tree prefix using diffnav-style logic (ASCII fallback
             // avoids ambiguous-width glyphs on xterm-like terminals)
             let (vertical_line, last_branch, branch) =
-                crate::icons::tree_parts(app.config.icon_mode);
+                tssdiff_core::icons::tree_parts(app.config.icon_mode);
             let mut tree_parts = Vec::new();
 
             // Add vertical lines for ancestor levels
@@ -365,40 +398,40 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
             if !tree_prefix.is_empty() {
                 spans.push(Span::styled(
                     tree_prefix.clone(),
-                    Style::default().fg(app.theme.colors.tree_line.0),
+                    Style::default().fg(app.theme.colors.tree_line.0.rat()),
                 ));
             }
 
             // Add checkbox for files (not directories)
             if !tree_item.is_directory {
                 let is_checked = app.checked_files.contains(&tree_item.full_path);
-                let checkbox = crate::icons::checkbox(is_checked, app.config.icon_mode);
+                let checkbox = tssdiff_core::icons::checkbox(is_checked, app.config.icon_mode);
                 let checkbox_style = if is_selected {
-                    Style::default().fg(app.theme.colors.tree_selected_fg.0)
+                    Style::default().fg(app.theme.colors.tree_selected_fg.0.rat())
                 } else {
-                    Style::default().fg(app.theme.colors.text_primary.0)
+                    Style::default().fg(app.theme.colors.text_primary.0.rat())
                 };
                 spans.push(Span::styled(checkbox, checkbox_style));
             }
 
             // Get icon based on item type
             let icon = if tree_item.is_directory {
-                crate::icons::directory_icon(tree_item.is_expanded, app.config.icon_mode)
+                tssdiff_core::icons::directory_icon(tree_item.is_expanded, app.config.icon_mode)
             } else {
                 // File - use file_diff icon or default
                 tree_item
                     .file_diff
                     .as_ref()
                     .map(|fd| fd.get_file_icon(app.config.icon_mode))
-                    .unwrap_or(crate::icons::file_icon("", app.config.icon_mode))
+                    .unwrap_or(tssdiff_core::icons::file_icon("", app.config.icon_mode))
             };
 
             // Apply color to directory icon
             if tree_item.is_directory {
                 let icon_style = if is_selected {
-                    Style::default().fg(app.theme.colors.tree_selected_fg.0)
+                    Style::default().fg(app.theme.colors.tree_selected_fg.0.rat())
                 } else {
-                    Style::default().fg(app.theme.colors.tree_directory.0)
+                    Style::default().fg(app.theme.colors.tree_directory.0.rat())
                 };
                 spans.push(Span::styled(format!("{icon} "), icon_style));
             } else {
@@ -407,16 +440,16 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
 
             // Add file/directory name with appropriate color
             let name_style = if is_selected {
-                Style::default().fg(app.theme.colors.tree_selected_fg.0)
+                Style::default().fg(app.theme.colors.tree_selected_fg.0.rat())
             } else if tree_item.is_directory {
-                Style::default().fg(app.theme.colors.tree_directory.0)
+                Style::default().fg(app.theme.colors.tree_directory.0.rat())
             } else {
                 // Staged files show green; checked (reviewed) files dim
                 let is_staged = app.staged_files.contains(&tree_item.full_path);
                 let base_color = if is_staged {
-                    app.theme.colors.status_added.0
+                    app.theme.colors.status_added.0.rat()
                 } else {
-                    app.theme.colors.tree_file.0
+                    app.theme.colors.tree_file.0.rat()
                 };
                 let is_checked = app.checked_files.contains(&tree_item.full_path);
                 if is_checked {
@@ -431,7 +464,7 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
             // Calculate available space for the name
             let tree_prefix_width = tree_prefix.chars().count();
             let checkbox_width = if !tree_item.is_directory {
-                crate::icons::checkbox(false, app.config.icon_mode)
+                tssdiff_core::icons::checkbox(false, app.config.icon_mode)
                     .chars()
                     .count()
             } else {
@@ -491,12 +524,12 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
                         if part.starts_with('+') {
                             spans.push(Span::styled(
                                 format!("{part} "),
-                                Style::default().fg(app.theme.colors.status_added.0),
+                                Style::default().fg(app.theme.colors.status_added.0.rat()),
                             ));
                         } else if part.starts_with('-') {
                             spans.push(Span::styled(
                                 part.to_string(),
-                                Style::default().fg(app.theme.colors.status_removed.0),
+                                Style::default().fg(app.theme.colors.status_removed.0.rat()),
                             ));
                         } else {
                             spans.push(Span::raw(format!("{part} ")));
@@ -532,9 +565,9 @@ pub fn render_file_list(f: &mut Frame, area: Rect, app: &mut App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .style(Style::default().fg(app.theme.colors.border.0)),
+                .style(Style::default().fg(app.theme.colors.border.0.rat())),
         )
-        .style(Style::default().fg(app.theme.colors.text_primary.0));
+        .style(Style::default().fg(app.theme.colors.text_primary.0.rat()));
 
     f.render_stateful_widget(file_list, area, &mut app.file_list_state);
 }
@@ -547,7 +580,7 @@ pub fn render_diff_content(f: &mut Frame, area: Rect, app: &mut App) {
     // Use actual diff area width for maximum utilization
     if !matches!(
         app.config.get_diff_command_type(),
-        crate::config::DiffCommandType::GitDefault
+        tssdiff_core::config::DiffCommandType::GitDefault
     ) && should_refresh_diff_width(app, area.width)
     {
         // Pass both terminal width and actual area width for flexible template calculation
@@ -581,7 +614,7 @@ pub fn render_diff_content(f: &mut Frame, area: Rect, app: &mut App) {
                     "Diff Content (using {}) - [h/l: scroll, j/k: files, g/G: jump]",
                     app.config.get_diff_display_name()
                 ))
-                .style(Style::default().fg(app.theme.colors.border.0)),
+                .style(Style::default().fg(app.theme.colors.border.0.rat())),
         )
         .scroll((app.vertical_scroll, app.horizontal_scroll))
         .wrap(Wrap { trim: false });
@@ -611,19 +644,19 @@ pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
             vec![Span::styled(
                 format!(
                     " {} Working tree changes | Enter: open",
-                    crate::icons::bullet(app.config.icon_mode)
+                    tssdiff_core::icons::bullet(app.config.icon_mode)
                 ),
-                Style::default().fg(app.theme.colors.status_added.0),
+                Style::default().fg(app.theme.colors.status_added.0.rat()),
             )]
         } else if let Some(commit) = app.commits.get(app.commit_index - 1) {
             vec![
                 Span::styled(
                     format!(" {} ", commit.hash),
-                    Style::default().fg(app.theme.colors.status_modified.0),
+                    Style::default().fg(app.theme.colors.status_modified.0.rat()),
                 ),
                 Span::styled(
                     format!("{} ", commit.date),
-                    Style::default().fg(app.theme.colors.text_secondary.0),
+                    Style::default().fg(app.theme.colors.text_secondary.0.rat()),
                 ),
                 Span::raw(commit.subject.clone()),
             ]
@@ -637,7 +670,7 @@ pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::raw(" : "));
             spans.push(Span::styled(
                 tree_item.full_path.clone(),
-                Style::default().fg(app.theme.colors.tree_directory.0),
+                Style::default().fg(app.theme.colors.tree_directory.0.rat()),
             ));
             spans.push(Span::raw(" | Directory | "));
         } else if let Some(file_diff) = &tree_item.file_diff {
@@ -647,7 +680,7 @@ pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
             )));
             spans.push(Span::styled(
                 tree_item.full_path.clone(),
-                Style::default().fg(app.theme.colors.tree_file.0),
+                Style::default().fg(app.theme.colors.tree_file.0.rat()),
             ));
             spans.push(Span::raw(" | "));
 
@@ -658,12 +691,12 @@ pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
                 if part.starts_with('+') {
                     spans.push(Span::styled(
                         part.to_string(),
-                        Style::default().fg(app.theme.colors.status_added.0),
+                        Style::default().fg(app.theme.colors.status_added.0.rat()),
                     ));
                 } else if part.starts_with('-') {
                     spans.push(Span::styled(
                         part.to_string(),
-                        Style::default().fg(app.theme.colors.status_removed.0),
+                        Style::default().fg(app.theme.colors.status_removed.0.rat()),
                     ));
                 } else {
                     spans.push(Span::raw(part.to_string()));
@@ -676,7 +709,7 @@ pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
             if app.staged_files.contains(&tree_item.full_path) {
                 spans.push(Span::styled(
                     "staged | ".to_string(),
-                    Style::default().fg(app.theme.colors.status_added.0),
+                    Style::default().fg(app.theme.colors.status_added.0.rat()),
                 ));
             }
         } else {
@@ -700,9 +733,9 @@ pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Status")
-                .style(Style::default().fg(app.theme.colors.border_focused.0)),
+                .style(Style::default().fg(app.theme.colors.border_focused.0.rat())),
         )
-        .style(Style::default().fg(app.theme.colors.status_bar_fg.0))
+        .style(Style::default().fg(app.theme.colors.status_bar_fg.0.rat()))
         .wrap(Wrap { trim: false });
 
     f.render_widget(status, area);
@@ -729,16 +762,16 @@ pub fn render_search_box(f: &mut Frame, area: Rect, app: &App) {
 
     let search_style = if app.search_query.is_empty() && app.search_input_mode {
         Style::default()
-            .fg(app.theme.colors.text_primary.0)
+            .fg(app.theme.colors.text_primary.0.rat())
             .add_modifier(ratatui::style::Modifier::DIM)
     } else {
-        Style::default().fg(app.theme.colors.text_primary.0)
+        Style::default().fg(app.theme.colors.text_primary.0.rat())
     };
 
     let border_style = if app.search_input_mode {
-        Style::default().fg(app.theme.colors.border_focused.0)
+        Style::default().fg(app.theme.colors.border_focused.0.rat())
     } else {
-        Style::default().fg(app.theme.colors.border.0)
+        Style::default().fg(app.theme.colors.border.0.rat())
     };
 
     let text_width = Line::from(search_text.as_str()).width() as u16;
@@ -805,26 +838,26 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
     let gutter_width = max_line_number.to_string().len().max(3);
 
     let gap_marker = match app.config.icon_mode {
-        crate::config::IconMode::Ascii => "---",
+        tssdiff_core::config::IconMode::Ascii => "---",
         _ => "···",
     };
     let gap_line = |hidden: usize| {
         Line::from(Span::styled(
             format!("{gap_marker} {hidden} lines hidden (x: full view) {gap_marker}"),
             Style::default()
-                .fg(app.theme.colors.text_dim.0)
+                .fg(app.theme.colors.text_dim.0.rat())
                 .add_modifier(Modifier::DIM),
         ))
     };
 
-    let cursor_bg = Style::default().bg(app.theme.colors.tree_selected_bg.0);
+    let cursor_bg = Style::default().bg(app.theme.colors.tree_selected_bg.0.rat());
     let selection = app.comment_selection();
     let mut old_lines: Vec<Line> = Vec::with_capacity(end - start);
     let mut new_lines: Vec<Line> = Vec::with_capacity(end - start);
     for (offset, entry) in display[start..end].iter().enumerate() {
         let absolute = start + offset;
-        let is_cursor =
-            selection.is_some_and(|(span_start, span_end)| (span_start..=span_end).contains(&absolute));
+        let is_cursor = selection
+            .is_some_and(|(span_start, span_end)| (span_start..=span_end).contains(&absolute));
         match entry {
             DisplayRow::Row(index) => {
                 let row = &rows[*index];
@@ -865,7 +898,7 @@ pub fn render_side_by_side(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         " After - [v: after only, x: condensed]"
     };
-    let border_style = Style::default().fg(app.theme.colors.border.0);
+    let border_style = Style::default().fg(app.theme.colors.border.0.rat());
     let after_area = if after_only {
         area
     } else {
@@ -907,30 +940,30 @@ fn side_line(row: &AlignedRow, old_side: bool, gutter_width: usize, app: &App) -
         return Line::from(Span::styled(
             format!(
                 "{:>gutter_width$} ",
-                crate::icons::filler(app.config.icon_mode)
+                tssdiff_core::icons::filler(app.config.icon_mode)
             ),
             Style::default()
-                .fg(app.theme.colors.text_dim.0)
+                .fg(app.theme.colors.text_dim.0.rat())
                 .add_modifier(Modifier::DIM),
         ));
     };
 
     let (marker, kind_color, row_bg) = match row.kind {
-        RowKind::Context => (' ', app.theme.colors.text_primary.0, None),
+        RowKind::Context => (' ', app.theme.colors.text_primary.0.rat(), None),
         RowKind::Removed => (
             '-',
-            app.theme.colors.status_removed.0,
-            Some(app.theme.colors.diff_removed_bg.0),
+            app.theme.colors.status_removed.0.rat(),
+            Some(app.theme.colors.diff_removed_bg.0.rat()),
         ),
         RowKind::Added => (
             '+',
-            app.theme.colors.status_added.0,
-            Some(app.theme.colors.diff_added_bg.0),
+            app.theme.colors.status_added.0.rat(),
+            Some(app.theme.colors.diff_added_bg.0.rat()),
         ),
         RowKind::Modified => (
             '~',
-            app.theme.colors.status_modified.0,
-            Some(app.theme.colors.diff_modified_bg.0),
+            app.theme.colors.status_modified.0.rat(),
+            Some(app.theme.colors.diff_modified_bg.0.rat()),
         ),
     };
 
@@ -938,7 +971,7 @@ fn side_line(row: &AlignedRow, old_side: bool, gutter_width: usize, app: &App) -
         Span::styled(
             format!("{number:>gutter_width$} "),
             Style::default()
-                .fg(app.theme.colors.text_dim.0)
+                .fg(app.theme.colors.text_dim.0.rat())
                 .add_modifier(Modifier::DIM),
         ),
         Span::styled(format!("{marker} "), Style::default().fg(kind_color)),
@@ -981,18 +1014,18 @@ fn note_line(note_index: usize, body_line: usize, gutter_width: usize, app: &App
 
     let is_own = note.author == "you";
     let author_color = if is_own {
-        app.theme.colors.status_modified.0
+        app.theme.colors.status_modified.0.rat()
     } else {
-        app.theme.colors.status_added.0
+        app.theme.colors.status_added.0.rat()
     };
     let icon = match app.config.icon_mode {
-        crate::config::IconMode::Ascii => "*",
+        tssdiff_core::config::IconMode::Ascii => "*",
         _ => "💬",
     };
 
     let mut spans = vec![Span::styled(
         format!("{:>gutter_width$} ", ""),
-        Style::default().fg(app.theme.colors.text_dim.0),
+        Style::default().fg(app.theme.colors.text_dim.0.rat()),
     )];
     if body_line == 0 {
         spans.push(Span::styled(
@@ -1006,7 +1039,7 @@ fn note_line(note_index: usize, body_line: usize, gutter_width: usize, app: &App
     }
     spans.push(Span::styled(
         text,
-        Style::default().fg(app.theme.colors.text_primary.0),
+        Style::default().fg(app.theme.colors.text_primary.0.rat()),
     ));
     Line::from(spans)
 }
@@ -1022,7 +1055,7 @@ pub fn render_comment_input(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let cursor = match app.config.icon_mode {
-        crate::config::IconMode::Ascii => "_",
+        tssdiff_core::config::IconMode::Ascii => "_",
         _ => "▏",
     };
     let title = format!(
@@ -1033,18 +1066,18 @@ pub fn render_comment_input(f: &mut Frame, area: Rect, app: &App) {
     let input = Paragraph::new(Line::from(vec![
         Span::styled(
             format!(" {}", app.comment_text),
-            Style::default().fg(app.theme.colors.text_primary.0),
+            Style::default().fg(app.theme.colors.text_primary.0.rat()),
         ),
         Span::styled(
             cursor,
-            Style::default().fg(app.theme.colors.border_focused.0),
+            Style::default().fg(app.theme.colors.border_focused.0.rat()),
         ),
     ]))
     .block(
         Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .style(Style::default().fg(app.theme.colors.border_focused.0)),
+            .style(Style::default().fg(app.theme.colors.border_focused.0.rat())),
     );
     f.render_widget(input, popup);
     place_input_cursor(f, popup, &app.comment_text);
@@ -1054,15 +1087,15 @@ pub fn render_warning_bar(f: &mut Frame, area: Rect, app: &App) {
     if let Some(ref warning) = app.warning_message {
         let warning_widget = Paragraph::new(Span::styled(
             format!(" {warning}"),
-            Style::default().fg(app.theme.colors.status_bar_fg.0),
+            Style::default().fg(app.theme.colors.status_bar_fg.0.rat()),
         ))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Warning")
-                .style(Style::default().fg(app.theme.colors.warning_border.0)),
+                .style(Style::default().fg(app.theme.colors.warning_border.0.rat())),
         )
-        .style(Style::default().fg(app.theme.colors.status_bar_fg.0));
+        .style(Style::default().fg(app.theme.colors.status_bar_fg.0.rat()));
         f.render_widget(warning_widget, area);
     }
 }

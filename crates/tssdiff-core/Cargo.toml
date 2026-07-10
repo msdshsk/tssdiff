@@ -1,0 +1,32 @@
+[package]
+name = "tssdiff-core"
+description = "UI-agnostic diff engine, git access, and agent-feedback core for tssdiff"
+readme = "../../README.md"
+keywords = ["diff", "git", "viewer"]
+categories = ["development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+dirs = "6.0"
+similar = "3"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+arboard = { version = "3", default-features = false }
+unicode-width = "0.2"
+clap = { version = "4.5", features = ["derive"], optional = true }
+
+[features]
+# Derives clap::ValueEnum on config enums used as CLI flags (TUI only)
+clap = ["dep:clap"]
+
+[dev-dependencies]
+tempfile.workspace = true
