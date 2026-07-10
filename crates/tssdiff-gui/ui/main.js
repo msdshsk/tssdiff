@@ -31,6 +31,8 @@ const state = {
   notes: [],           // NoteOut list for the current file
   awaiting: new Set(), // question ids still waiting for a reply
   lastReplies: 0,
+  wrap: localStorage.getItem('tssdiff.wrap') === '1',
+  maxCh: 0,            // widest code line of the current diff, in ch
 };
 
 /* Keep context lines around changes; fold longer runs (mirrors core) */
@@ -322,6 +324,60 @@ function segsHtml(segs) {
     .join('');
 }
 
+/* ---------- line width / wrap handling ---------- */
+const WIDE_RE = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/g;
+
+/* Display columns of one side's segments (CJK counts as 2ch) */
+function segsWidth(segs) {
+  let width = 0;
+  for (const s of segs) {
+    width += s.t.length + (s.t.match(WIDE_RE) || []).length;
+  }
+  return width;
+}
+
+let chPx = 0;
+function measureCh() {
+  if (chPx) return chPx;
+  const probe = document.createElement('span');
+  probe.textContent = '0'.repeat(100);
+  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;';
+  $('diffScroll').appendChild(probe);
+  chPx = probe.getBoundingClientRect().width / 100 || 7;
+  probe.remove();
+  return chPx;
+}
+
+/* Size the code columns: at least the pane width (so short diffs fill
+   it), at most the longest line (enabling horizontal scrolling) */
+function updateCodeWidth() {
+  if (state.wrap) {
+    diffBody.style.setProperty('--codecol', 'minmax(0, 1fr)');
+    return;
+  }
+  const cols = state.afterOnly ? 1 : 2;
+  const gutters = 52 * cols;
+  const padding = 24 * cols; // .dcell horizontal padding
+  const avail = ($('diffScroll').clientWidth - gutters - padding - 2) / cols;
+  const availCh = Math.floor(avail / measureCh());
+  const ch = Math.max(state.maxCh, availCh);
+  diffBody.style.setProperty('--codecol', `calc(${ch}ch + 24px)`);
+}
+
+function setWrap(on) {
+  state.wrap = on;
+  localStorage.setItem('tssdiff.wrap', on ? '1' : '0');
+  $('diffPane').classList.toggle('wrap', on);
+  updateCodeWidth();
+  toast(on ? '行を折り返します' : '行の折り返しを解除しました(横スクロール可)');
+}
+
+let resizeRaf = 0;
+window.addEventListener('resize', () => {
+  cancelAnimationFrame(resizeRaf);
+  resizeRaf = requestAnimationFrame(updateCodeWidth);
+});
+
 /// One visual block stacking every note anchored to the same row
 function noteBlock(notes) {
   const wrap = document.createElement('div');
@@ -378,6 +434,7 @@ function renderDiff() {
 
   const frag = document.createDocumentFragment();
   if (orphans.length) frag.appendChild(noteBlock(orphans));
+  let maxCh = 0;
   for (const entry of displayList()) {
     if (entry.fold !== undefined) {
       const el = document.createElement('div');
@@ -389,6 +446,8 @@ function renderDiff() {
     }
     const i = entry.row;
     const r = state.rows[i];
+    if (r.new) maxCh = Math.max(maxCh, segsWidth(r.new));
+    if (r.old && !state.afterOnly) maxCh = Math.max(maxCh, segsWidth(r.old));
     const el = document.createElement('div');
     el.className = 'drow';
     el.dataset.idx = i;
@@ -414,11 +473,14 @@ function renderDiff() {
     const anchored = notesByRow.get(i);
     if (anchored) frag.appendChild(noteBlock(anchored));
   }
+  state.maxCh = maxCh;
   const scroller = $('diffScroll');
   const scrollTop = scroller.scrollTop;
   diffBody.innerHTML = '';
   diffBody.appendChild(frag);
   diffBody.parentElement.classList.toggle('after-only', state.afterOnly);
+  $('diffPane').classList.toggle('wrap', state.wrap);
+  updateCodeWidth();
   scroller.scrollTop = scrollTop;
   applySelection();
 }
@@ -876,6 +938,12 @@ function generalMenu() {
       disabled: !state.current,
     },
     {
+      label: state.wrap ? '行の折り返しを解除' : '行を折り返す',
+      kbd: 'Alt+Z',
+      action: () => setWrap(!state.wrap),
+      disabled: !state.current,
+    },
+    {
       label: 'ファイルツリーの表示/非表示',
       kbd: 'Ctrl+B',
       action: () => $('treePane').classList.toggle('hidden'),
@@ -1190,6 +1258,7 @@ const KEYS = [
   ]},
   { title: '表示', rows: [
     ['Ctrl+1 / Ctrl+2', '', 'Side-by-side / After-only 切替', false],
+    ['Alt+Z', '', '行の折り返し ⇄ 横スクロール', false],
     ['Ctrl+B', '', 'ファイルツリーの開閉', false],
     ['F5', '', '再 diff', false],
     ['クリック(折りたたみ行)', '', '変更なし区間の展開', false],
@@ -1261,6 +1330,9 @@ document.addEventListener('keydown', (e) => {
   } else if (e.altKey && (e.key === '1' || e.key === '2' || e.key === '3')) {
     e.preventDefault();
     switchTab({ 1: 'working', 2: 'staged', 3: 'history' }[e.key]);
+  } else if (e.altKey && (e.key === 'z' || e.key === 'Z')) {
+    e.preventDefault();
+    setWrap(!state.wrap);
   } else if (e.ctrlKey && e.key === 'PageDown') {
     e.preventDefault();
     stepFile(1);

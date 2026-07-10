@@ -853,9 +853,23 @@ fn linux_webview_workarounds() {
     let is_wsl = std::fs::read_to_string("/proc/version")
         .map(|v| v.to_lowercase().contains("microsoft"))
         .unwrap_or(false);
-    if is_wsl && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+    if !is_wsl {
+        return;
+    }
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         // SAFETY: runs before any other thread exists
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
+    // Skip Mesa's d3d12 driver entirely: it spams the terminal with
+    // "Dropped Escape call with ulEscapeCode ..." via WSLg's vGPU, and
+    // a text-heavy viewer is fine on llvmpipe. Explicit user settings
+    // win.
+    if std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_none()
+        && std::env::var_os("MESA_LOADER_DRIVER_OVERRIDE").is_none()
+        && std::env::var_os("GALLIUM_DRIVER").is_none()
+    {
+        // SAFETY: runs before any other thread exists
+        unsafe { std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1") };
     }
 }
 

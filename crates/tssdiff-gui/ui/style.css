@@ -206,9 +206,14 @@ kbd {
 .file-head .hint { font-size: 11.5px; color: var(--muted); }
 
 .diff-scroll { flex: 1; overflow: auto; position: relative; font-family: var(--code); font-size: 12.5px; line-height: 1.6; }
-.drow { display: grid; grid-template-columns: 52px 1fr 52px 1fr; }
-.after-only .drow { grid-template-columns: 52px 1fr; }
+/* --codecol is set from JS: an explicit ch width sized to the longest
+   line (enabling horizontal scrolling), or minmax(0,1fr) when wrapping */
+#diffBody { --codecol: minmax(0, 1fr); width: max-content; min-width: 100%; }
+.diffpane.wrap #diffBody { width: auto; }
+.drow { display: grid; grid-template-columns: 52px var(--codecol) 52px var(--codecol); }
+.after-only .drow { grid-template-columns: 52px var(--codecol); }
 .dcell { padding: 0 12px; white-space: pre; overflow: hidden; user-select: text; }
+.diffpane.wrap .dcell { white-space: pre-wrap; overflow-wrap: anywhere; }
 .gut {
   text-align: right; padding: 0 8px; color: var(--muted);
   cursor: pointer; font-variant-numeric: tabular-nums;
