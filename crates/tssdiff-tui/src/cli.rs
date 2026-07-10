@@ -26,6 +26,10 @@ pub struct Cli {
     #[arg(long, short = 'f')]
     pub flat: bool,
 
+    /// Launch the desktop GUI (tssdiff-gui) instead of the TUI
+    #[arg(long)]
+    pub gui: bool,
+
     /// Icon set override (ascii recommended for plain xterm)
     #[arg(long, value_enum)]
     pub icons: Option<IconMode>,
@@ -140,6 +144,7 @@ mod tests {
             cached: false,
             worktree: false,
             flat: false,
+            gui: false,
             icons: None,
             config: None,
             verbose: false,
@@ -159,6 +164,7 @@ mod tests {
             cached: true,
             worktree: false,
             flat: false,
+            gui: false,
             icons: None,
             config: None,
             verbose: false,
@@ -178,6 +184,7 @@ mod tests {
             cached: false,
             worktree: false,
             flat: false,
+            gui: false,
             icons: None,
             config: None,
             verbose: false,
@@ -199,6 +206,7 @@ mod tests {
             cached: false,
             worktree: false,
             flat: false,
+            gui: false,
             icons: None,
             config: None,
             verbose: false,
@@ -218,6 +226,7 @@ mod tests {
             cached: false,
             worktree: false,
             flat: false,
+            gui: false,
             icons: None,
             config: None,
             verbose: false,

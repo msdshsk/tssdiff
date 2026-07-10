@@ -1914,6 +1914,33 @@ impl App {
     }
 }
 
+/// Spawn tssdiff-gui (preferring the binary next to this one) on the
+/// given target directory and return immediately
+fn launch_gui(target: Option<&str>) -> Result<()> {
+    let exe_name = if cfg!(windows) {
+        "tssdiff-gui.exe"
+    } else {
+        "tssdiff-gui"
+    };
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|dir| dir.join(exe_name)));
+    let program = match sibling {
+        Some(path) if path.exists() => path,
+        _ => std::path::PathBuf::from("tssdiff-gui"),
+    };
+    Command::new(&program)
+        .arg(target.unwrap_or("."))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to launch the GUI ({}): {e} - install or build tssdiff-gui first",
+                program.display()
+            )
+        })
+}
+
 fn main() -> Result<()> {
     // Parse command line arguments
     let cli = Cli::parse_args();
@@ -1922,6 +1949,11 @@ fn main() -> Result<()> {
     if let Some(Commands::Completions { shell }) = &cli.command {
         generate_completions(*shell);
         return Ok(());
+    }
+
+    // --gui hands over to the desktop frontend
+    if cli.gui {
+        return launch_gui(cli.targets.first().map(String::as_str));
     }
 
     let operation_mode = cli.get_operation_mode();

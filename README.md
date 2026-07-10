@@ -1,5 +1,32 @@
 # ftdv - File Tree Diff Viewer
 
+> **Note (tssdiff fork)**: this repository is the source of **tssdiff**, a fork of ftdv.
+> Alongside the TUI it now ships **tssdiff-gui**, a Tauri-based desktop app for
+> Windows/Linux/macOS sharing the same core (`crates/tssdiff-core`).
+
+## Desktop GUI (tssdiff-gui)
+
+A read-only desktop diff viewer with the same panes and agent-feedback flow as the TUI:
+
+- Working tree / staged / history browsing with an SVG commit graph
+- Side-by-side and after-only views, syntax highlighting, context folding
+- Agent feedback: select lines, send comments/questions, replies render inline
+- Auto-refresh via filesystem watching, contextual right-click menus
+- Works **without git installed**: a pure-Rust backend (gitoxide) kicks in
+  automatically (`git.backend: auto|cli|pure` in config.yaml)
+- Settings panel (`Ctrl+,`): editor, git backend, agent sink
+
+```bash
+# run the GUI on a repository
+tssdiff-gui path/to/repo   # or: tssdiff --gui
+
+# build from source
+cargo build --release -p tssdiff-gui
+
+# Windows installer (requires: cargo install tauri-cli --locked)
+make installer
+```
+
 ftdv (File Tree Diff Viewer) is a terminal-based diff viewer inspired by [diffnav](https://github.com/dlvhdr/diffnav) and [lazygit](https://github.com/jesseduffield/lazygit), built with [ratatui](https://github.com/ratatui-org/ratatui) in Rust. It combines diffnav's intuitive file navigation with lazygit's flexible diff tool configuration system, providing an interactive interface for viewing git diffs with support for various diff tools like delta, bat, ydiff, and difftastic.
 
 ## about

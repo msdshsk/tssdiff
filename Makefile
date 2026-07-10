@@ -1,6 +1,6 @@
-# ftdv Makefile
+# tssdiff Makefile
 
-.PHONY: all build install clean test lint format run-debug help
+.PHONY: all build build-dev install install-gui installer test lint format clean check help
 
 # Build targets
 all: build
@@ -11,79 +11,59 @@ build:
 build-dev:
 	cargo build
 
-install: build
-	cargo install --path .
+install:
+	cargo install --path crates/tssdiff-tui
+
+install-gui:
+	cargo install --path crates/tssdiff-gui
+
+# NSIS installer for the desktop GUI (requires cargo-tauri:
+#   cargo install tauri-cli --locked)
+installer:
+	cd crates/tssdiff-gui && cargo tauri build
 
 # Development targets
 test:
-	cargo test
+	cargo test --all-features
 
 lint:
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
 
 format:
-	cargo fmt
+	cargo fmt --all
 
 clean:
 	cargo clean
 
-# Debug and utilities
-run-debug:
-	FTDV_DEBUG=1 cargo run
-
 check:
-	cargo check
-
-# Installation and setup
-install-all: install
-	@echo "Installation complete!"
-	@echo ""
-	@echo "Usage:"
-	@echo "  ftdv                               # Working directory changes"
-	@echo "  ftdv branch1 branch2               # Compare branches"
-	@echo "  ftdv --cached                      # Staged changes"
-	@echo "  git diff | ftdv                    # Pipe mode (backward compatibility)"
-
-# Git integration setup
-setup-git:
-	@echo "Setting up git to use ftdv as pager..."
-	git config --global core.pager ftdv
-	@echo "Git configured to use ftdv"
-	@echo ""
-	@echo "Test with: git diff"
-
-uninstall-git:
-	@echo "Removing ftdv from git configuration..."
-	git config --global --unset core.pager || true
-	@echo "Git configuration cleaned up"
+	cargo check --all-features
 
 # Example config
 example-config:
-	@echo "Creating example config at ~/.config/ftdv/config.yaml"
-	@mkdir -p ~/.config/ftdv
-	@cp config.example.yaml ~/.config/ftdv/config.yaml
-	@echo "Edit ~/.config/ftdv/config.yaml to customize"
+	@echo "Creating example config at ~/.config/tssdiff/config.yaml"
+	@mkdir -p ~/.config/tssdiff
+	@cp config.example.yaml ~/.config/tssdiff/config.yaml
+	@echo "Edit ~/.config/tssdiff/config.yaml to customize"
 
 # Help
 help:
-	@echo "ftdv - A TUI diff pager"
+	@echo "tssdiff - read-only diff viewer (TUI + desktop GUI)"
 	@echo ""
 	@echo "Build targets:"
-	@echo "  build             Build release binary"
-	@echo "  build-dev         Build debug binary"
-	@echo "  install           Install ftdv binary"
-	@echo "  install-all       Install binary"
+	@echo "  build             Build all release binaries (tssdiff, tssdiff-gui)"
+	@echo "  build-dev         Build debug binaries"
+	@echo "  install           Install the TUI (cargo install)"
+	@echo "  install-gui       Install the desktop GUI"
+	@echo "  installer         Build the Windows NSIS installer for the GUI"
 	@echo ""
 	@echo "Development:"
-	@echo "  test              Run tests"
-	@echo "  lint              Run clippy linter"
+	@echo "  test              Run tests (all features)"
+	@echo "  lint              Run clippy (all targets/features)"
 	@echo "  format            Format code"
 	@echo "  check             Check compilation"
 	@echo "  clean             Clean build artifacts"
 	@echo ""
-	@echo "Git integration:"
-	@echo "  setup-git         Set up git to use ftdv as pager"
-	@echo "  uninstall-git     Remove git integration"
-	@echo ""
-	@echo "Configuration:"
-	@echo "  example-config    Create example config file"
+	@echo "Usage:"
+	@echo "  tssdiff                            # TUI: working directory changes"
+	@echo "  tssdiff --gui                      # Desktop GUI on the current repo"
+	@echo "  tssdiff-gui <path>                 # Desktop GUI on a repo"
