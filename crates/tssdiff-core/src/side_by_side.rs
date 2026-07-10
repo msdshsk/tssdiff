@@ -20,9 +20,14 @@ pub struct AlignedRow {
 
 /// Align two file versions line-by-line for side-by-side display
 pub fn align(old_text: &str, new_text: &str) -> Vec<AlignedRow> {
+    // Compare with normalized line endings: on autocrlf checkouts the
+    // worktree side is CRLF while blobs are LF, which would otherwise
+    // mark every line of the file as modified
+    let old_text = old_text.replace("\r\n", "\n");
+    let new_text = new_text.replace("\r\n", "\n");
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
-    let diff = TextDiff::from_lines(old_text, new_text);
+    let diff = TextDiff::from_lines(old_text.as_str(), new_text.as_str());
 
     let mut rows = Vec::new();
     for op in diff.ops() {
@@ -230,6 +235,14 @@ mod tests {
         let rows = align("a\r\n", "b\r\n");
         assert_eq!(rows[0].old, Some((1, "a".to_string())));
         assert_eq!(rows[0].new, Some((1, "b".to_string())));
+    }
+
+    #[test]
+    fn test_crlf_only_difference_is_context() {
+        // CRLF worktree vs LF blob must not read as an all-modified file
+        let rows = align("a\r\nb\r\n", "a\nb\n");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.kind == RowKind::Context));
     }
 
     #[test]
