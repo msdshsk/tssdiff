@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tssdiff</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="titlebar" data-tauri-drag-region>
+  <div class="app-glyph" data-tauri-drag-region>±</div>
+  <span class="app-name" data-tauri-drag-region>tssdiff</span>
+  <span class="repo-chip" id="repoChip" hidden>
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.25a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm0 2.122a2.25 2.25 0 1 0-1.5 0v5.256a2.251 2.251 0 1 0 1.5 0V5.372Zm6.5.622a2.25 2.25 0 1 0-1.5 0v.94a.75.75 0 0 1-.22.53l-2.5 2.5a.75.75 0 1 0 1.06 1.06l2.5-2.5c.42-.42.66-.99.66-1.59v-.94ZM4.25 13.5a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5Zm7.5-9a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Z"/></svg>
+    <span id="repoLabel"></span>
+  </span>
+  <div class="titlebar-drag" data-tauri-drag-region></div>
+  <div class="win-controls">
+    <button id="winMin" title="最小化" aria-label="最小化">─</button>
+    <button id="winMax" title="最大化" aria-label="最大化">▢</button>
+    <button id="winClose" class="close" title="閉じる" aria-label="閉じる">✕</button>
+  </div>
+</div>
+
+<div class="toolbar">
+  <div class="mode-tabs" role="tablist" id="modeTabs">
+    <button role="tab" data-mode="working" aria-selected="true">Working Tree</button>
+    <button role="tab" data-mode="staged" aria-selected="false">Staged</button>
+    <button role="tab" data-mode="history" aria-selected="false">History</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="searchbox">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-1.06 1.06l-3.04-3.04ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"/></svg>
+    <input type="text" id="fileFilter" placeholder="ファイル名で絞り込み" aria-label="ファイル名で絞り込み">
+  </div>
+  <div class="view-toggle" role="group" aria-label="表示モード">
+    <button id="viewSbs" aria-pressed="true">Side-by-side</button>
+    <button id="viewAfter" aria-pressed="false">After-only</button>
+  </div>
+  <button class="iconbtn" id="btnRefresh" title="更新 (F5)" aria-label="更新">
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
+  </button>
+  <button class="iconbtn" id="btnOpen" title="リポジトリを開く (Ctrl+O)" aria-label="リポジトリを開く">
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M.513 1.513A1.75 1.75 0 0 1 1.75 1h3.5c.55 0 1.07.26 1.4.7l.9 1.2a.25.25 0 0 0 .2.1h6.5c.966 0 1.75.784 1.75 1.75v8.5A1.75 1.75 0 0 1 14.25 15H1.75A1.75 1.75 0 0 1 0 13.25V2.75c0-.464.184-.909.513-1.237Z"/></svg>
+  </button>
+</div>
+
+<div class="app-body">
+  <aside class="tree" id="treePane">
+    <div class="tree-head">
+      <span>Changes</span>
+      <span class="stat" id="treeStat"></span>
+    </div>
+    <div class="tree-list" id="treeList"></div>
+  </aside>
+
+  <main class="diffpane">
+    <div class="file-head" id="fileHead" hidden>
+      <span class="path" id="fhPath"></span>
+      <span class="fh-stat" id="fhStat"></span>
+      <div class="spacer"></div>
+      <span class="hint">行番号クリック / Shift+クリックで範囲選択</span>
+    </div>
+    <div class="diff-scroll" id="diffScroll">
+      <div id="diffBody"></div>
+      <div class="empty-state" id="emptyState">
+        <div class="app-glyph big">±</div>
+        <h2 id="emptyTitle">リポジトリを開いてください</h2>
+        <p id="emptyBody">Ctrl+O、または右上のフォルダボタンから git リポジトリを選択します。<br>コマンドラインからは <code>tssdiff-gui &lt;path&gt;</code> で直接開けます。</p>
+        <button class="accent-btn" id="emptyOpen">リポジトリを開く</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="statusbar">
+  <span class="seg" id="sbBranch" hidden>
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Z"/></svg>
+    <span id="sbBranchName"></span>
+  </span>
+  <span class="seg" id="sbMode">Working Tree</span>
+  <span class="seg" id="sbFile"></span>
+  <div class="spacer"></div>
+  <span class="seg keyhint" id="btnHelp"><kbd>?</kbd> ショートカット</span>
+</div>
+
+<div class="overlay" id="helpOverlay" role="dialog" aria-modal="true" aria-label="キーボードショートカット">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h2>キーボードショートカット</h2>
+      <button class="sheet-close" id="helpClose" aria-label="閉じる">✕</button>
+    </div>
+    <p class="sheet-note"><span class="badge soon">予定</span> の付いたキーは今後のフェーズで実装されます。</p>
+    <div class="keygrid" id="keyCards"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status"></div>
+
+<script src="main.js"></script>
+</body>
+</html>

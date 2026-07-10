@@ -1,0 +1,26 @@
+[package]
+name = "tssdiff-gui"
+description = "Desktop (Tauri) frontend for tssdiff - a read-only diff viewer with agent feedback"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tssdiff-core = { path = "../tssdiff-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[[bin]]
+name = "tssdiff-gui"
+path = "src/main.rs"

@@ -36,3 +36,5 @@ coverage/
 # Config files (user specific)
 config.yaml
 !config.example.yaml
+# Tauri generated schemas
+crates/tssdiff-gui/gen/
