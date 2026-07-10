@@ -234,7 +234,7 @@ fn open_in_editor(path: String, state: State<AppState>) -> Result<String, String
 /// Editors worth probing for, in preference order
 fn detect_editors() -> Vec<EditorCandidate> {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    let known: [(&str, String); 9] = [
+    let known: [(&str, String); 10] = [
         (
             "Visual Studio Code",
             format!("{local}\\Programs\\Microsoft VS Code\\Code.exe"),
@@ -242,6 +242,10 @@ fn detect_editors() -> Vec<EditorCandidate> {
         ("Cursor", format!("{local}\\Programs\\cursor\\Cursor.exe")),
         ("Zed", format!("{local}\\Programs\\Zed\\Zed.exe")),
         ("Zed", format!("{local}\\Zed\\Zed.exe")),
+        (
+            "EmEditor",
+            format!("{local}\\Programs\\EmEditor\\EmEditor.exe"),
+        ),
         (
             "EmEditor",
             "C:\\Program Files\\EmEditor\\EmEditor.exe".to_string(),
