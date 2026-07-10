@@ -17,7 +17,9 @@ const appWindow = window.__TAURI__.window.getCurrentWindow();
 /* ---------- state ---------- */
 const state = {
   repo: null,        // { root, branch }
-  mode: 'working',   // 'working' | 'staged'
+  mode: 'working',   // 'working' | 'staged' | 'commit:<hash>'
+  historyMode: false,
+  commits: [],       // [{ hash, date, subject }]
   files: [],         // [{ path, added, removed }]
   current: null,     // selected file path
   rows: [],          // aligned rows of the current diff
@@ -69,7 +71,8 @@ async function tryOpen(path, silent) {
     $('sbBranchName').textContent = info.branch;
     const name = info.root.split(/[\\/]/).pop();
     appWindow.setTitle(name + ' — tssdiff');
-    await loadFiles();
+    state.commits = [];
+    await switchTab('working');
   } catch (e) {
     if (!silent) toast(String(e));
     showWelcome();
@@ -97,10 +100,25 @@ function showWelcome() {
 function showNoChanges() {
   $('emptyState').classList.add('show');
   $('emptyTitle').textContent = '変更はありません';
-  $('emptyBody').textContent =
-    state.mode === 'staged' ? 'ステージされた変更がありません。' : 'ワーキングツリーはクリーンです。';
+  $('emptyBody').textContent = state.mode.startsWith('commit:')
+    ? 'このコミットに変更はありません。'
+    : state.mode === 'staged'
+      ? 'ステージされた変更がありません。'
+      : 'ワーキングツリーはクリーンです。';
   $('emptyOpen').hidden = true;
   $('fileHead').hidden = true;
+  diffBody.innerHTML = '';
+}
+
+function showBinary(path) {
+  const f = state.files.find((x) => x.path === path);
+  $('fileHead').hidden = false;
+  $('fhPath').textContent = path;
+  $('fhStat').innerHTML = f ? `<span class="a">+${f.added}</span> <span class="d">−${f.removed}</span>` : '';
+  $('emptyState').classList.add('show');
+  $('emptyTitle').textContent = 'バイナリファイル';
+  $('emptyBody').textContent = 'テキストとして表示できないため、差分表示をスキップしました。';
+  $('emptyOpen').hidden = true;
   diffBody.innerHTML = '';
 }
 
@@ -214,6 +232,12 @@ async function loadDiff(path) {
     out = await invoke('load_diff', { mode: state.mode, path, theme: syntectTheme() });
   } catch (e) {
     toast(String(e));
+    return;
+  }
+  if (out.binary) {
+    state.rows = [];
+    state.notes = [];
+    showBinary(path);
     return;
   }
   state.rows = out.rows;
@@ -573,20 +597,94 @@ setInterval(async () => {
 }, 2000);
 
 /* ---------- modes / views ---------- */
+function modeLabel() {
+  if (state.mode.startsWith('commit:')) return 'History · ' + state.mode.slice(7);
+  if (state.historyMode) return 'History · Working tree';
+  return state.mode === 'staged' ? 'Staged' : 'Working Tree';
+}
+
+async function switchTab(tab) {
+  document.querySelectorAll('#modeTabs button').forEach((b) =>
+    b.setAttribute('aria-selected', String(b.dataset.mode === tab))
+  );
+  state.historyMode = tab === 'history';
+  $('commitPane').hidden = !state.historyMode;
+  $('filesHeadLabel').classList.remove('hash');
+  if (state.historyMode) {
+    state.mode = 'working';
+    $('filesHeadLabel').textContent = 'Files';
+    if (state.repo) await loadCommits();
+  } else {
+    state.mode = tab;
+    $('filesHeadLabel').textContent = 'Changes';
+    renderCommits();
+  }
+  $('sbMode').textContent = modeLabel();
+  if (state.repo) loadFiles();
+}
+
 $('modeTabs').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-mode]');
-  if (!btn) return;
-  const mode = btn.dataset.mode;
-  if (mode === 'history') {
-    toast('History モードは今後のフェーズで実装予定です');
+  if (btn) switchTab(btn.dataset.mode);
+});
+
+/* ---------- history (commit list) ---------- */
+async function loadCommits() {
+  try {
+    state.commits = await invoke('load_commits');
+  } catch (e) {
+    toast(String(e));
+    state.commits = [];
+  }
+  $('commitStat').textContent = state.commits.length
+    ? `${state.commits.length}${state.commits.length >= 300 ? '+' : ''} commits`
+    : '';
+  renderCommits();
+}
+
+function renderCommits() {
+  const list = $('commitList');
+  if (!state.historyMode) {
+    list.innerHTML = '';
     return;
   }
-  state.mode = mode;
-  document.querySelectorAll('#modeTabs button').forEach((b) =>
-    b.setAttribute('aria-selected', String(b === btn))
-  );
-  $('sbMode').textContent = mode === 'staged' ? 'Staged' : 'Working Tree';
-  if (state.repo) loadFiles();
+  const selected = state.mode.startsWith('commit:') ? state.mode.slice(7) : null;
+  const frag = document.createDocumentFragment();
+
+  const wt = document.createElement('div');
+  wt.className = 'citem wt' + (selected === null ? ' active' : '');
+  wt.dataset.commit = '';
+  wt.setAttribute('role', 'button');
+  wt.tabIndex = 0;
+  wt.innerHTML = '<div class="crow"><span class="csubj">● Working tree</span></div>';
+  frag.appendChild(wt);
+
+  for (const c of state.commits) {
+    const el = document.createElement('div');
+    el.className = 'citem' + (selected === c.hash ? ' active' : '');
+    el.dataset.commit = c.hash;
+    el.setAttribute('role', 'button');
+    el.tabIndex = 0;
+    el.innerHTML =
+      `<div class="crow"><span class="chash">${esc(c.hash)}</span>` +
+      `<span class="csubj">${esc(c.subject)}</span></div>` +
+      `<span class="cdate">${esc(c.date)}</span>`;
+    frag.appendChild(el);
+  }
+  list.innerHTML = '';
+  list.appendChild(frag);
+}
+
+$('commitList').addEventListener('click', (e) => {
+  const item = e.target.closest('.citem');
+  if (!item) return;
+  const hash = item.dataset.commit;
+  state.mode = hash ? 'commit:' + hash : 'working';
+  $('filesHeadLabel').textContent = hash ? hash : 'Files';
+  $('filesHeadLabel').classList.toggle('hash', !!hash);
+  $('sbMode').textContent = modeLabel();
+  renderCommits();
+  loadFiles();
 });
 
 function setView(afterOnly) {
@@ -605,7 +703,20 @@ function updateStatus() {
 }
 
 /* ---------- toolbar ---------- */
-$('btnRefresh').addEventListener('click', () => state.repo && loadFiles());
+function refreshAll() {
+  if (!state.repo) return;
+  if (state.historyMode) loadCommits();
+  loadFiles();
+}
+
+function stepFile(delta) {
+  if (!state.files.length) return;
+  const i = state.files.findIndex((f) => f.path === state.current);
+  const next = ((i < 0 ? 0 : i + delta) + state.files.length) % state.files.length;
+  selectFile(state.files[next].path);
+}
+
+$('btnRefresh').addEventListener('click', refreshAll);
 $('btnOpen').addEventListener('click', pickRepo);
 $('emptyOpen').addEventListener('click', pickRepo);
 $('fileFilter').addEventListener('input', (e) => {
@@ -623,9 +734,9 @@ const KEYS = [
   { title: 'ナビゲーション', rows: [
     ['↑ / ↓', 'j / k', '行カーソル移動', true],
     ['F8 / Shift+F8', 'n / p', '次 / 前の変更ハンクへ', true],
-    ['Ctrl+PgDn / Ctrl+PgUp', '', '次 / 前のファイルへ', true],
+    ['Ctrl+PgDn / Ctrl+PgUp', '', '次 / 前のファイルへ', false],
     ['Ctrl+F', '/', 'diff 内を検索', true],
-    ['Home / End', 'g / G', 'ファイル先頭 / 末尾へ', true],
+    ['Home / End', 'g / G', 'ファイル先頭 / 末尾へ', false],
   ]},
   { title: '表示', rows: [
     ['Ctrl+1 / Ctrl+2', '', 'Side-by-side / After-only 切替', false],
@@ -642,7 +753,7 @@ const KEYS = [
     ['R', '', '次の注釈スレッドへ', false],
   ]},
   { title: 'モード / アプリ', rows: [
-    ['Alt+1 / 2 / 3', '', 'Working / Staged / History', true],
+    ['Alt+1 / 2 / 3', '', 'Working / Staged / History', false],
     ['Ctrl+O', '', 'リポジトリを開く', false],
     ['? または F1', '?', 'このショートカット一覧', false],
     ['Esc', '', '選択解除 / 閉じる', false],
@@ -689,7 +800,21 @@ document.addEventListener('keydown', (e) => {
     else clearSelection();
   } else if (e.key === 'F5') {
     e.preventDefault();
-    if (state.repo) loadFiles();
+    refreshAll();
+  } else if (e.altKey && (e.key === '1' || e.key === '2' || e.key === '3')) {
+    e.preventDefault();
+    switchTab({ 1: 'working', 2: 'staged', 3: 'history' }[e.key]);
+  } else if (e.ctrlKey && e.key === 'PageDown') {
+    e.preventDefault();
+    stepFile(1);
+  } else if (e.ctrlKey && e.key === 'PageUp') {
+    e.preventDefault();
+    stepFile(-1);
+  } else if (e.key === 'Home') {
+    $('diffScroll').scrollTop = 0;
+  } else if (e.key === 'End') {
+    const s = $('diffScroll');
+    s.scrollTop = s.scrollHeight;
   } else if (e.ctrlKey && (e.key === 'o' || e.key === 'O')) {
     e.preventDefault();
     pickRepo();
@@ -712,6 +837,15 @@ document.addEventListener('keydown', (e) => {
 
 /* ---------- boot ---------- */
 (async function init() {
+  const gitVersion = await invoke('git_check');
+  if (!gitVersion) {
+    $('emptyState').classList.add('show');
+    $('emptyTitle').textContent = 'git が見つかりません';
+    $('emptyBody').textContent =
+      'tssdiff は git コマンドで差分を取得します。git をインストールして PATH に通してから、再起動してください。';
+    $('emptyOpen').hidden = true;
+    return;
+  }
   const suggested = await invoke('initial_repo');
   if (suggested) await tryOpen(suggested, true);
   else showWelcome();

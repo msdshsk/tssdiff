@@ -48,8 +48,15 @@
 
 <div class="app-body">
   <aside class="tree" id="treePane">
+    <div class="commit-pane" id="commitPane" hidden>
+      <div class="tree-head">
+        <span>Commits</span>
+        <span class="stat" id="commitStat"></span>
+      </div>
+      <div class="commit-list" id="commitList"></div>
+    </div>
     <div class="tree-head">
-      <span>Changes</span>
+      <span id="filesHeadLabel">Changes</span>
       <span class="stat" id="treeStat"></span>
     </div>
     <div class="tree-list" id="treeList"></div>

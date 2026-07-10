@@ -153,9 +153,33 @@ kbd {
   display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
 }
 .tree-head .stat { font-family: var(--code); font-size: 11px; letter-spacing: 0; text-transform: none; }
+#filesHeadLabel.hash { text-transform: none; letter-spacing: 0; font-family: var(--code); color: var(--accent); }
 .a { color: var(--add); }
 .d { color: var(--del); }
 .tree-list { padding: 6px 0; overflow-y: auto; flex: 1; }
+
+/* commit list (History mode, upper section of the left pane) */
+.commit-pane {
+  display: flex; flex-direction: column;
+  flex: 0 0 46%; min-height: 0;
+  border-bottom: 1px solid var(--line);
+}
+.commit-list { overflow-y: auto; flex: 1; padding: 4px 0; }
+.citem {
+  padding: 4px 14px 4px 11px; cursor: pointer;
+  border-left: 3px solid transparent;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.citem:hover { background: var(--accent-softer); }
+.citem.active { background: var(--accent-soft); border-left-color: var(--accent); }
+.citem .crow { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.citem .chash { font-family: var(--code); font-size: 11px; color: var(--accent); flex: none; }
+.citem .csubj {
+  font-family: var(--ui); font-size: 12px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.citem .cdate { font-family: var(--code); font-size: 10.5px; color: var(--muted); padding-left: 1px; }
+.citem.wt .csubj { color: var(--add); font-weight: 600; }
 .titem {
   display: flex; align-items: center; gap: 7px;
   padding: 4px 14px 4px 0; cursor: pointer; border-left: 3px solid transparent;

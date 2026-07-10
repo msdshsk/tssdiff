@@ -80,6 +80,15 @@ struct DiffOut {
     rows: Vec<RowOut>,
     highlighted: bool,
     notes: Vec<NoteOut>,
+    /// True when the file could not be decoded as text
+    binary: bool,
+}
+
+#[derive(Serialize)]
+struct CommitOut {
+    hash: String,
+    date: String,
+    subject: String,
 }
 
 #[derive(Serialize)]
@@ -103,6 +112,11 @@ struct SendOut {
 }
 
 fn mode_from(mode: &str) -> OperationMode {
+    if let Some(commit) = mode.strip_prefix("commit:") {
+        return OperationMode::GitCommit {
+            commit: commit.to_string(),
+        };
+    }
     match mode {
         "staged" => OperationMode::GitCached,
         _ => OperationMode::GitWorkingDirectory,
@@ -123,6 +137,34 @@ fn git_branch() -> Option<String> {
 #[tauri::command]
 fn initial_repo(state: State<AppState>) -> Option<String> {
     state.initial_path.lock().unwrap().clone()
+}
+
+/// Version string when git is on PATH, None otherwise - the frontend
+/// shows a setup hint instead of a misleading "not a repository" error
+#[tauri::command]
+fn git_check() -> Option<String> {
+    let out = Command::new("git").arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[tauri::command]
+fn load_commits() -> Result<Vec<CommitOut>, String> {
+    GitExecutor::new()
+        .get_commit_log(300)
+        .map_err(|e| e.to_string())
+        .map(|commits| {
+            commits
+                .into_iter()
+                .map(|c| CommitOut {
+                    hash: c.hash,
+                    date: c.date,
+                    subject: c.subject,
+                })
+                .collect()
+        })
 }
 
 #[tauri::command]
@@ -181,9 +223,19 @@ fn load_diff(
         .cloned()
         .ok_or_else(|| format!("ファイルが見つかりません: {path}"))?;
 
-    let (old_text, new_text) = GitExecutor::new()
-        .get_file_versions(&op, &file)
-        .map_err(|e| e.to_string())?;
+    let (old_text, new_text) = match GitExecutor::new().get_file_versions(&op, &file) {
+        Ok(pair) => pair,
+        // Undecodable content means a binary file, not a failure
+        Err(e) if e.to_string().to_lowercase().contains("utf-8") => {
+            return Ok(DiffOut {
+                rows: Vec::new(),
+                highlighted: false,
+                notes: Vec::new(),
+                binary: true,
+            });
+        }
+        Err(e) => return Err(e.to_string()),
+    };
 
     let rows = side_by_side::align(&old_text, &new_text);
     let hl = highlight::highlight_pair(
@@ -226,6 +278,7 @@ fn load_diff(
         rows: rows_out,
         highlighted,
         notes,
+        binary: false,
     })
 }
 
@@ -371,8 +424,10 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             initial_repo,
+            git_check,
             open_repo,
             load_files,
+            load_commits,
             load_diff,
             send_feedback,
             poll_notes
