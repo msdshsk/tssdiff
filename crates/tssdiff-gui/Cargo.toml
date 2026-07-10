@@ -14,7 +14,7 @@ authors.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tssdiff-core = { path = "../tssdiff-core" }
+tssdiff-core = { path = "../tssdiff-core", features = ["pure-git"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde.workspace = true

@@ -2,15 +2,14 @@
 
 use serde::Serialize;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Mutex;
 use tauri::State;
 use tssdiff_core::agent::{AgentSession, FeedbackKind};
-use tssdiff_core::config::Config;
-use tssdiff_core::git::GitExecutor;
+use tssdiff_core::config::{Config, GitBackendKind};
 use tssdiff_core::highlight;
 use tssdiff_core::mode::OperationMode;
-use tssdiff_core::parser::{DiffParser, FileDiff};
+use tssdiff_core::parser::FileDiff;
+use tssdiff_core::repo::{self, RepoBackend};
 use tssdiff_core::side_by_side::{self, AlignedRow, RowKind};
 
 /// Highlighting cap, mirroring the TUI's full-view cap: rows past this
@@ -31,12 +30,16 @@ struct AppState {
     /// Aligned rows of the file currently shown, for selections/anchors
     current_rows: Mutex<Vec<AlignedRow>>,
     current_file: Mutex<Option<String>>,
+    /// Repository access, CLI or pure-Rust per config/auto-detection
+    backend: Mutex<Option<RepoBackend>>,
 }
 
 #[derive(Serialize)]
 struct RepoInfo {
     root: String,
     branch: String,
+    /// Active backend name: "git" (CLI) or "gix" (built-in)
+    backend: String,
 }
 
 #[derive(Serialize)]
@@ -123,15 +126,18 @@ fn mode_from(mode: &str) -> OperationMode {
     }
 }
 
-fn git_branch() -> Option<String> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+/// TSSDIFF_GIT_BACKEND=cli|pure|auto overrides the configured backend
+fn backend_kind_override() -> Option<GitBackendKind> {
+    match std::env::var("TSSDIFF_GIT_BACKEND")
+        .ok()?
+        .to_lowercase()
+        .as_str()
+    {
+        "cli" => Some(GitBackendKind::Cli),
+        "pure" | "gix" => Some(GitBackendKind::Pure),
+        "auto" => Some(GitBackendKind::Auto),
+        _ => None,
     }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 #[tauri::command]
@@ -140,20 +146,18 @@ fn initial_repo(state: State<AppState>) -> Option<String> {
 }
 
 /// Version string when git is on PATH, None otherwise - the frontend
-/// shows a setup hint instead of a misleading "not a repository" error
+/// notes that the built-in backend will cover for it
 #[tauri::command]
 fn git_check() -> Option<String> {
-    let out = Command::new("git").arg("--version").output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    repo::git_cli_version()
 }
 
 #[tauri::command]
-fn load_commits() -> Result<Vec<CommitOut>, String> {
-    GitExecutor::new()
-        .get_commit_log(300)
+fn load_commits(state: State<AppState>) -> Result<Vec<CommitOut>, String> {
+    let backend = state.backend.lock().unwrap();
+    let backend = backend.as_ref().ok_or("リポジトリが開かれていません")?;
+    backend
+        .commit_log(300)
         .map_err(|e| e.to_string())
         .map(|commits| {
             commits
@@ -171,29 +175,36 @@ fn load_commits() -> Result<Vec<CommitOut>, String> {
 fn open_repo(path: String, state: State<AppState>) -> Result<RepoInfo, String> {
     let dir = PathBuf::from(&path);
     std::env::set_current_dir(&dir).map_err(|e| format!("フォルダを開けません: {e}"))?;
-    if !GitExecutor::is_git_repo() {
-        return Err(format!("git リポジトリではありません: {path}"));
-    }
-    let root = GitExecutor::toplevel().map_err(|e| e.to_string())?;
+
+    let config = Config::load().map_err(|e| e.to_string())?;
+    let kind = backend_kind_override().unwrap_or(config.git.backend);
+    let backend = RepoBackend::open(&dir, kind).map_err(|e| e.to_string())?;
+    let root = backend.toplevel().map_err(|e| e.to_string())?;
     std::env::set_current_dir(&root).map_err(|e| e.to_string())?;
-    let branch = git_branch().unwrap_or_else(|| "?".to_string());
+    let branch = backend.branch().unwrap_or_else(|| "?".to_string());
+    let backend_name = backend.name().to_string();
 
     *state.session.lock().unwrap() = Some(AgentSession::new(root.clone()));
-    *state.config.lock().unwrap() = Some(Config::load().map_err(|e| e.to_string())?);
+    *state.config.lock().unwrap() = Some(config);
+    *state.backend.lock().unwrap() = Some(backend);
     *state.current_file.lock().unwrap() = None;
     state.current_rows.lock().unwrap().clear();
 
     Ok(RepoInfo {
         root: root.display().to_string(),
         branch,
+        backend: backend_name,
     })
 }
 
 #[tauri::command]
 fn load_files(mode: String, state: State<AppState>) -> Result<Vec<FileEntry>, String> {
     let op = mode_from(&mode);
-    let diff = GitExecutor::new().get_diff(&op).map_err(|e| e.to_string())?;
-    let files = DiffParser::parse(&diff);
+    let files = {
+        let backend = state.backend.lock().unwrap();
+        let backend = backend.as_ref().ok_or("リポジトリが開かれていません")?;
+        backend.changed_files(&op).map_err(|e| e.to_string())?
+    };
     let entries = files
         .iter()
         .map(|f| FileEntry {
@@ -223,7 +234,12 @@ fn load_diff(
         .cloned()
         .ok_or_else(|| format!("ファイルが見つかりません: {path}"))?;
 
-    let (old_text, new_text) = match GitExecutor::new().get_file_versions(&op, &file) {
+    let versions = {
+        let backend = state.backend.lock().unwrap();
+        let backend = backend.as_ref().ok_or("リポジトリが開かれていません")?;
+        backend.file_versions(&op, &file)
+    };
+    let (old_text, new_text) = match versions {
         Ok(pair) => pair,
         // Undecodable content means a binary file, not a failure
         Err(e) if e.to_string().to_lowercase().contains("utf-8") => {
@@ -264,8 +280,14 @@ fn load_diff(
                 kind,
                 old_no: row.old.as_ref().map(|(n, _)| *n),
                 new_no: row.new.as_ref().map(|(n, _)| *n),
-                old: row.old.as_ref().map(|(n, t)| segments(old_hl.as_ref(), *n, t)),
-                new: row.new.as_ref().map(|(n, t)| segments(new_hl.as_ref(), *n, t)),
+                old: row
+                    .old
+                    .as_ref()
+                    .map(|(n, t)| segments(old_hl.as_ref(), *n, t)),
+                new: row
+                    .new
+                    .as_ref()
+                    .map(|(n, t)| segments(new_hl.as_ref(), *n, t)),
             }
         })
         .collect();
@@ -347,7 +369,9 @@ fn send_feedback(
     let mut session_guard = state.session.lock().unwrap();
     let session = session_guard.as_mut().ok_or("セッションがありません")?;
     let payload = session.build_payload(kind, &file, &rows, sel_start, sel_end, &comment);
-    let status = session.send(&config.agent, &payload).map_err(|e| e.to_string())?;
+    let status = session
+        .send(&config.agent, &payload)
+        .map_err(|e| e.to_string())?;
 
     let notes = map_notes(session, &file, &rows);
     let (sent, replies) = note_counts(session);

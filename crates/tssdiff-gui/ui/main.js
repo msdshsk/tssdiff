@@ -69,6 +69,8 @@ async function tryOpen(path, silent) {
     $('repoLabel').textContent = info.root + ' · ' + info.branch;
     $('sbBranch').hidden = false;
     $('sbBranchName').textContent = info.branch;
+    $('sbBackend').hidden = false;
+    $('sbBackend').textContent = info.backend === 'gix' ? 'via gix (built-in)' : 'via git';
     const name = info.root.split(/[\\/]/).pop();
     appWindow.setTitle(name + ' — tssdiff');
     state.commits = [];
@@ -839,12 +841,8 @@ document.addEventListener('keydown', (e) => {
 (async function init() {
   const gitVersion = await invoke('git_check');
   if (!gitVersion) {
-    $('emptyState').classList.add('show');
-    $('emptyTitle').textContent = 'git が見つかりません';
-    $('emptyBody').textContent =
-      'tssdiff は git コマンドで差分を取得します。git をインストールして PATH に通してから、再起動してください。';
-    $('emptyOpen').hidden = true;
-    return;
+    // the built-in gix backend covers reading; just let the user know
+    toast('git コマンドが見つからないため、内蔵バックエンド (gix) で動作します');
   }
   const suggested = await invoke('initial_repo');
   if (suggested) await tryOpen(suggested, true);

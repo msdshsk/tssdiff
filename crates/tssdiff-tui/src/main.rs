@@ -2832,6 +2832,7 @@ mod tests {
                     pager: "nonexistent_diff_tool_xyz".to_string(),
                     ..Default::default()
                 },
+                ..Default::default()
             },
             ..Default::default()
         };

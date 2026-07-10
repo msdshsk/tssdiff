@@ -94,10 +94,28 @@ impl Default for DiffCommand {
     }
 }
 
+/// Which git implementation backs repository access. Auto prefers the
+/// external git CLI and falls back to the built-in gitoxide backend
+/// when git is not installed (builds with the `pure-git` feature).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GitBackendKind {
+    #[default]
+    Auto,
+    /// Always use the external `git` command
+    Cli,
+    /// Always use the built-in pure-Rust backend (gitoxide)
+    Pure,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct GitConfig {
     #[serde(default)]
     pub paging: GitPagingConfig,
+
+    /// Backend selection: auto (default) / cli / pure
+    #[serde(default)]
+    pub backend: GitBackendKind,
 }
 
 /// Where feedback sent with `c` (comment/question to an agent) goes

@@ -11,6 +11,9 @@ pub mod icons;
 pub mod mode;
 pub mod parser;
 pub mod persistence;
+#[cfg(feature = "pure-git")]
+pub mod puregit;
+pub mod repo;
 pub mod side_by_side;
 pub mod theme;
 pub mod tree;
