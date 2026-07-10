@@ -594,9 +594,38 @@ impl GitExecutor {
     fn untracked_files_diff_in(repo_root: &Path) -> Result<String> {
         let mut result = String::new();
         for file in Self::list_untracked_in(repo_root)? {
-            result.push_str(&Self::no_index_diff("/dev/null", &file, Some(repo_root))?);
+            result.push_str(&Self::synthetic_added_diff(repo_root, &file));
         }
         Ok(result)
+    }
+
+    /// All-added unified diff for an untracked file, generated without
+    /// spawning git: one `git diff --no-index` per untracked file used
+    /// to dominate load time on repos with many untracked files.
+    /// A file that vanishes mid-scan yields an empty entry.
+    fn synthetic_added_diff(repo_root: &Path, rel_path: &str) -> String {
+        let Ok(bytes) = std::fs::read(repo_root.join(rel_path)) else {
+            return String::new();
+        };
+        let mut out = format!("diff --git a/{rel_path} b/{rel_path}\nnew file mode 100644\n");
+        let text = match String::from_utf8(bytes) {
+            Ok(text) if !text.contains('\0') => text,
+            _ => {
+                out.push_str(&format!("Binary files /dev/null and b/{rel_path} differ\n"));
+                return out;
+            }
+        };
+        out.push_str(&format!("--- /dev/null\n+++ b/{rel_path}\n"));
+        let line_count = text.lines().count();
+        if line_count > 0 {
+            out.push_str(&format!("@@ -0,0 +1,{line_count} @@\n"));
+            for line in text.lines() {
+                out.push('+');
+                out.push_str(line.trim_end_matches('\r'));
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// Untracked files (recursive, .gitignore respected), relative to repo_root
@@ -634,7 +663,7 @@ impl GitExecutor {
             return Ok(String::new());
         }
 
-        Self::no_index_diff("/dev/null", file_path, Some(&repo_root))
+        Ok(Self::synthetic_added_diff(&repo_root, file_path))
     }
 
     /// Check if a string is a valid git ref

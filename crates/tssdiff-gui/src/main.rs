@@ -841,7 +841,24 @@ fn segments(hl: Option<&highlight::HighlightedLines>, lineno: usize, raw: &str) 
     }]
 }
 
+/// WSLg's virtualized GPU breaks WebKitGTK's DMA-BUF renderer, leaving
+/// a blank white webview; fall back to software rendering there.
+/// An explicitly set WEBKIT_DISABLE_DMABUF_RENDERER always wins.
+#[cfg(target_os = "linux")]
+fn linux_webview_workarounds() {
+    let is_wsl = std::fs::read_to_string("/proc/version")
+        .map(|v| v.to_lowercase().contains("microsoft"))
+        .unwrap_or(false);
+    if is_wsl && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        // SAFETY: runs before any other thread exists
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    linux_webview_workarounds();
+
     // `tssdiff-gui [path]` opens that repo; a bare launch from a
     // terminal offers the invocation directory
     let initial = std::env::args()
