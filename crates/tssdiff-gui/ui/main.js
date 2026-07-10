@@ -268,7 +268,10 @@ async function loadDiff(path, keepScroll) {
   $('fhPath').textContent = path;
   $('fhStat').innerHTML = f ? `<span class="a">+${f.added}</span> <span class="d">−${f.removed}</span>` : '';
   if (!unchanged) renderDiff();
-  if (!keepScroll) $('diffScroll').scrollTop = 0;
+  if (!keepScroll) {
+    $('diffScroll').scrollTop = 0;
+    updateHScroll(true);
+  }
 }
 
 /* Display list: rows kept near changes, long context runs folded */
@@ -348,34 +351,67 @@ function measureCh() {
   return chPx;
 }
 
-/* Size the code columns: at least the pane width (so short diffs fill
-   it), at most the longest line (enabling horizontal scrolling) */
-function updateCodeWidth() {
-  if (state.wrap) {
-    diffBody.style.setProperty('--codecol', 'minmax(0, 1fr)');
+/* Both code panes share one horizontal scroll: the bar below the diff
+   sets --hx and every line slides via translateX, while gutters and
+   the old/new split stay fixed */
+function updateHScroll(reset) {
+  const bar = $('hBar');
+  if (reset) {
+    bar.scrollLeft = 0;
+    diffBody.style.setProperty('--hx', '0px');
+  }
+  if (state.wrap || !state.rows.length) {
+    bar.classList.remove('show');
+    diffBody.style.setProperty('--hx', '0px');
     return;
   }
-  const cols = state.afterOnly ? 1 : 2;
-  const gutters = 52 * cols;
-  const padding = 24 * cols; // .dcell horizontal padding
-  const avail = ($('diffScroll').clientWidth - gutters - padding - 2) / cols;
-  const availCh = Math.floor(avail / measureCh());
-  const ch = Math.max(state.maxCh, availCh);
-  diffBody.style.setProperty('--codecol', `calc(${ch}ch + 24px)`);
+  const cell = diffBody.querySelector('.dcell');
+  if (!cell) {
+    bar.classList.remove('show');
+    return;
+  }
+  const visible = cell.clientWidth - 24; // minus horizontal padding
+  const maxPx = Math.ceil(state.maxCh * measureCh()) + 8;
+  if (visible > 0 && maxPx > visible) {
+    bar.classList.add('show');
+    $('hBarInner').style.width = `${bar.clientWidth + (maxPx - visible)}px`;
+  } else {
+    bar.classList.remove('show');
+    bar.scrollLeft = 0;
+    diffBody.style.setProperty('--hx', '0px');
+  }
 }
 
 function setWrap(on) {
   state.wrap = on;
   localStorage.setItem('tssdiff.wrap', on ? '1' : '0');
   $('diffPane').classList.toggle('wrap', on);
-  updateCodeWidth();
+  updateHScroll(true);
   toast(on ? '行を折り返します' : '行の折り返しを解除しました(横スクロール可)');
 }
+
+$('hBar').addEventListener('scroll', () => {
+  diffBody.style.setProperty('--hx', `-${$('hBar').scrollLeft}px`);
+});
+
+$('diffScroll').addEventListener(
+  'wheel',
+  (e) => {
+    const bar = $('hBar');
+    if (!bar.classList.contains('show')) return;
+    const dx = e.deltaX || (e.shiftKey ? e.deltaY : 0);
+    if (dx) {
+      e.preventDefault();
+      bar.scrollLeft += dx;
+    }
+  },
+  { passive: false }
+);
 
 let resizeRaf = 0;
 window.addEventListener('resize', () => {
   cancelAnimationFrame(resizeRaf);
-  resizeRaf = requestAnimationFrame(updateCodeWidth);
+  resizeRaf = requestAnimationFrame(() => updateHScroll(false));
 });
 
 /// One visual block stacking every note anchored to the same row
@@ -452,12 +488,14 @@ function renderDiff() {
     el.className = 'drow';
     el.dataset.idx = i;
 
+    const lc = (segs) => (segs && segs.length ? `<span class="lc">${segsHtml(segs)}</span>` : '');
     if (state.afterOnly) {
       if (r.new_no == null) continue;
       const changed = r.kind === 'add' || r.kind === 'mod';
       el.innerHTML =
         `<div class="gut${changed ? ' gadd' : ''}" data-idx="${i}">${r.new_no}</div>` +
-        `<div class="dcell new-side${changed ? ' add-line' : ''}">${segsHtml(r.new)}</div>`;
+        `<div class="dcell new-side${changed ? ' add-line' : ''}">${lc(r.new)}</div>` +
+        ``;
     } else {
       const oGut = r.kind === 'del' || r.kind === 'mod' ? ' gdel' : '';
       const nGut = r.kind === 'add' || r.kind === 'mod' ? ' gadd' : '';
@@ -465,9 +503,9 @@ function renderDiff() {
       const nCls = r.kind === 'add' || r.kind === 'mod' ? ' add-line' : '';
       el.innerHTML =
         `<div class="gut${r.old_no != null ? oGut : ''}" data-idx="${i}">${r.old_no ?? ''}</div>` +
-        `<div class="dcell old-side${r.old ? oCls : ''}">${r.old ? segsHtml(r.old) : ''}</div>` +
+        `<div class="dcell old-side${r.old ? oCls : ''}">${r.old ? lc(r.old) : ''}</div>` +
         `<div class="gut${r.new_no != null ? nGut : ''}" data-idx="${i}">${r.new_no ?? ''}</div>` +
-        `<div class="dcell new-side${r.new ? nCls : ''}">${r.new ? segsHtml(r.new) : ''}</div>`;
+        `<div class="dcell new-side${r.new ? nCls : ''}">${r.new ? lc(r.new) : ''}</div>`;
     }
     frag.appendChild(el);
     const anchored = notesByRow.get(i);
@@ -480,7 +518,7 @@ function renderDiff() {
   diffBody.appendChild(frag);
   diffBody.parentElement.classList.toggle('after-only', state.afterOnly);
   $('diffPane').classList.toggle('wrap', state.wrap);
-  updateCodeWidth();
+  updateHScroll(false);
   scroller.scrollTop = scrollTop;
   applySelection();
 }
@@ -939,7 +977,7 @@ function generalMenu() {
     },
     {
       label: state.wrap ? '行の折り返しを解除' : '行を折り返す',
-      kbd: 'Alt+Z',
+      kbd: 'Alt+W',
       action: () => setWrap(!state.wrap),
       disabled: !state.current,
     },
@@ -1258,7 +1296,7 @@ const KEYS = [
   ]},
   { title: '表示', rows: [
     ['Ctrl+1 / Ctrl+2', '', 'Side-by-side / After-only 切替', false],
-    ['Alt+Z', '', '行の折り返し ⇄ 横スクロール', false],
+    ['Alt+W / Alt+Z', '', '行の折り返し ⇄ 横スクロール', false],
     ['Ctrl+B', '', 'ファイルツリーの開閉', false],
     ['F5', '', '再 diff', false],
     ['クリック(折りたたみ行)', '', '変更なし区間の展開', false],
@@ -1330,7 +1368,8 @@ document.addEventListener('keydown', (e) => {
   } else if (e.altKey && (e.key === '1' || e.key === '2' || e.key === '3')) {
     e.preventDefault();
     switchTab({ 1: 'working', 2: 'staged', 3: 'history' }[e.key]);
-  } else if (e.altKey && (e.key === 'z' || e.key === 'Z')) {
+  } else if (e.altKey && ['z', 'Z', 'w', 'W'].includes(e.key)) {
+    // Alt+W included: Alt+Z is often captured by the NVIDIA overlay
     e.preventDefault();
     setWrap(!state.wrap);
   } else if (e.ctrlKey && e.key === 'PageDown') {
