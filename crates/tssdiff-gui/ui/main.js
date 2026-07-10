@@ -26,6 +26,9 @@ const state = {
   collapsedDirs: new Set(),
   expandedFolds: new Set(),
   sel: { start: null, end: null },
+  notes: [],           // NoteOut list for the current file
+  awaiting: new Set(), // question ids still waiting for a reply
+  lastReplies: 0,
 };
 
 /* Keep context lines around changes; fold longer runs (mirrors core) */
@@ -214,6 +217,8 @@ async function loadDiff(path) {
     return;
   }
   state.rows = out.rows;
+  state.notes = out.notes;
+  updateAwaiting();
   const f = state.files.find((x) => x.path === path);
   $('emptyState').classList.remove('show');
   $('fileHead').hidden = false;
@@ -228,9 +233,13 @@ function displayList() {
   const rows = state.rows;
   if (!rows.length) return [];
   const keep = new Array(rows.length).fill(false);
+  // rows with notes stay visible, like changed rows
+  const noteRows = new Set(
+    state.notes.map((n) => n.row).filter((r) => r !== null && r !== undefined)
+  );
   let hasChange = false;
   rows.forEach((r, i) => {
-    if (r.kind !== 'ctx') {
+    if (r.kind !== 'ctx' || noteRows.has(i)) {
       hasChange = true;
       const s = Math.max(0, i - FOLD_CONTEXT);
       const e = Math.min(rows.length, i + FOLD_CONTEXT + 1);
@@ -272,8 +281,62 @@ function segsHtml(segs) {
     .join('');
 }
 
+/// One visual block stacking every note anchored to the same row
+function noteBlock(notes) {
+  const wrap = document.createElement('div');
+  wrap.className = 'note-block';
+  for (const n of notes) {
+    const entry = document.createElement('div');
+    entry.className = 'note-entry';
+    const who =
+      n.author === 'you'
+        ? '<span class="you">あなた</span>'
+        : `<span class="agent-dot"></span>${esc(n.author)}`;
+    const line =
+      n.new_line != null ? `新 ${n.new_line} 行` : n.old_line != null ? `旧 ${n.old_line} 行` : '';
+    const long = n.body.split('\n').length > 4 || n.body.length > 320;
+    entry.innerHTML =
+      `<div class="who">${who}<span>· ${line}</span></div>` +
+      `<div class="nbody${long ? ' folded' : ''}">${esc(n.body)}</div>` +
+      (long ? '<button class="note-more">すべて表示</button>' : '');
+    wrap.appendChild(entry);
+  }
+  const awaiting = notes.some((n) => n.author === 'you' && state.awaiting.has(n.reply_to));
+  if (awaiting) {
+    const p = document.createElement('div');
+    p.className = 'note-pending';
+    p.innerHTML = '<span class="pulse"></span>エージェントへ送信済み — 返信待ち';
+    wrap.appendChild(p);
+  }
+  return wrap;
+}
+
+function updateAwaiting() {
+  for (const n of state.notes) {
+    if (n.author !== 'you' && n.reply_to) state.awaiting.delete(n.reply_to);
+  }
+}
+
+function updateNotesBadge(sent, replies) {
+  const el = $('sbNotes');
+  el.hidden = !(sent + replies);
+  el.textContent = `notes ${sent} · replies ${replies}`;
+}
+
 function renderDiff() {
+  const notesByRow = new Map();
+  const orphans = [];
+  for (const n of state.notes) {
+    if (n.row === null || n.row === undefined) {
+      orphans.push(n);
+      continue;
+    }
+    if (!notesByRow.has(n.row)) notesByRow.set(n.row, []);
+    notesByRow.get(n.row).push(n);
+  }
+
   const frag = document.createDocumentFragment();
+  if (orphans.length) frag.appendChild(noteBlock(orphans));
   for (const entry of displayList()) {
     if (entry.fold !== undefined) {
       const el = document.createElement('div');
@@ -307,14 +370,26 @@ function renderDiff() {
         `<div class="dcell new-side${r.new ? nCls : ''}">${r.new ? segsHtml(r.new) : ''}</div>`;
     }
     frag.appendChild(el);
+    const anchored = notesByRow.get(i);
+    if (anchored) frag.appendChild(noteBlock(anchored));
   }
+  const scroller = $('diffScroll');
+  const scrollTop = scroller.scrollTop;
   diffBody.innerHTML = '';
   diffBody.appendChild(frag);
   diffBody.parentElement.classList.toggle('after-only', state.afterOnly);
+  scroller.scrollTop = scrollTop;
   applySelection();
 }
 
 diffBody.addEventListener('click', (e) => {
+  const more = e.target.closest('.note-more');
+  if (more) {
+    const body = more.parentElement.querySelector('.nbody');
+    const folded = body.classList.toggle('folded');
+    more.textContent = folded ? 'すべて表示' : '折りたたむ';
+    return;
+  }
   const fold = e.target.closest('.fold-row');
   if (fold) {
     state.expandedFolds.add(Number(fold.dataset.fold));
@@ -326,6 +401,7 @@ diffBody.addEventListener('click', (e) => {
     const idx = Number(gut.dataset.idx);
     if (e.shiftKey && state.sel.start !== null) state.sel.end = idx;
     else { state.sel.start = idx; state.sel.end = idx; }
+    hidePopover();
     applySelection();
   }
 });
@@ -342,12 +418,159 @@ function applySelection() {
     const idx = Number(el.dataset.idx);
     el.classList.toggle('selected', !!range && idx >= range[0] && idx <= range[1]);
   });
+  positionFloat();
 }
 
 function clearSelection() {
   state.sel.start = state.sel.end = null;
+  $('popover').hidden = true;
   applySelection();
 }
+
+function lastSelectedRowEl() {
+  const rows = diffBody.querySelectorAll('.drow.selected');
+  return rows.length ? rows[rows.length - 1] : null;
+}
+
+function positionFloat() {
+  const btn = $('floatComment');
+  const last = lastSelectedRowEl();
+  if (!last || !$('popover').hidden) {
+    btn.hidden = true;
+    return;
+  }
+  btn.hidden = false;
+  btn.style.top = last.offsetTop + last.offsetHeight + 4 + 'px';
+  btn.style.left = '64px';
+}
+
+function selectedLineLabel() {
+  const range = selRange();
+  if (!range) return '';
+  const span = (key, prefix) => {
+    const nums = [];
+    for (let i = range[0]; i <= range[1]; i++) {
+      const r = state.rows[i];
+      if (r && r[key] != null) nums.push(r[key]);
+    }
+    if (!nums.length) return '';
+    return `${prefix} ${nums[0]}${nums.length > 1 ? '–' + nums[nums.length - 1] : ''} 行`;
+  };
+  return span('new_no', '新') || span('old_no', '旧');
+}
+
+/* ---------- feedback popover ---------- */
+let popKind = 'comment';
+
+function openPopover() {
+  const range = selRange();
+  if (!range) {
+    toast('先に行番号をクリックして範囲を選択してください');
+    return;
+  }
+  const last = lastSelectedRowEl();
+  const pop = $('popover');
+  $('popLines').textContent = (state.current || '') + ' · ' + selectedLineLabel();
+  pop.hidden = false;
+  pop.style.top = (last ? last.offsetTop + last.offsetHeight + 4 : 40) + 'px';
+  pop.style.left = '64px';
+  $('floatComment').hidden = true;
+  $('popText').value = '';
+  $('popText').focus();
+  requestAnimationFrame(() => pop.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+}
+
+function hidePopover() {
+  $('popover').hidden = true;
+  positionFloat();
+}
+
+function setKind(kind) {
+  popKind = kind;
+  document.querySelectorAll('#kindSeg button').forEach((b) =>
+    b.setAttribute('aria-pressed', String(b.dataset.kind === kind))
+  );
+}
+
+function toggleKind() {
+  setKind(popKind === 'comment' ? 'question' : 'comment');
+}
+
+async function sendFeedback() {
+  const text = $('popText').value.trim();
+  if (!text) {
+    $('popText').focus();
+    return;
+  }
+  const range = selRange();
+  if (!range) return;
+  $('popSend').disabled = true;
+  try {
+    const out = await invoke('send_feedback', {
+      kind: popKind,
+      comment: text,
+      selStart: range[0],
+      selEnd: range[1],
+    });
+    if (popKind === 'question') state.awaiting.add(out.id);
+    state.notes = out.notes;
+    state.lastReplies = out.replies;
+    updateNotesBadge(out.sent, out.replies);
+    hidePopover();
+    clearSelection();
+    renderDiff();
+    toast('送信しました: ' + out.status);
+  } catch (e) {
+    toast(String(e));
+  } finally {
+    $('popSend').disabled = false;
+  }
+}
+
+let threadCursor = -1;
+function jumpNextThread() {
+  const blocks = Array.from(diffBody.querySelectorAll('.note-block'));
+  if (!blocks.length) {
+    toast('注釈スレッドはありません');
+    return;
+  }
+  threadCursor = (threadCursor + 1) % blocks.length;
+  blocks[threadCursor].scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+$('floatComment').addEventListener('click', openPopover);
+$('popSend').addEventListener('click', sendFeedback);
+$('kindSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-kind]');
+  if (b) setKind(b.dataset.kind);
+});
+$('popText').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.ctrlKey) {
+    e.preventDefault();
+    sendFeedback();
+  } else if (e.key === 'Tab') {
+    e.preventDefault();
+    toggleKind();
+  }
+});
+
+/* ---------- reply polling (Q4: inline + badge + in-app toast) ---------- */
+setInterval(async () => {
+  if (!state.repo) return;
+  try {
+    const out = await invoke('poll_notes');
+    updateNotesBadge(out.sent, out.replies);
+    if (out.replies > state.lastReplies) {
+      state.lastReplies = out.replies;
+      state.notes = out.notes;
+      updateAwaiting();
+      renderDiff();
+      toast('エージェントから返信が届きました');
+    }
+  } catch (_) {
+    /* repo may be mid-switch; next tick recovers */
+  }
+}, 2000);
 
 /* ---------- modes / views ---------- */
 $('modeTabs').addEventListener('click', (e) => {
@@ -413,9 +636,10 @@ const KEYS = [
   ]},
   { title: 'エージェントフィードバック', rows: [
     ['行番号クリック + Shift+クリック', '', '行範囲を選択', false],
-    ['C', 'c', '選択範囲にコメントを書く', true],
-    ['Ctrl+Enter', '', 'エージェントに送信', true],
-    ['R', '', '次の返信スレッドへ', true],
+    ['C', 'c', '選択範囲にコメントを書く', false],
+    ['Ctrl+Enter', '', 'エージェントに送信(入力中)', false],
+    ['Tab', '', 'コメント ⇄ 質問の種別切替(入力中)', false],
+    ['R', '', '次の注釈スレッドへ', false],
   ]},
   { title: 'モード / アプリ', rows: [
     ['Alt+1 / 2 / 3', '', 'Working / Staged / History', true],
@@ -450,7 +674,10 @@ overlay.addEventListener('click', (e) => { if (e.target === overlay) closeHelp()
 document.addEventListener('keydown', (e) => {
   const tag = e.target.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA') {
-    if (e.key === 'Escape') e.target.blur();
+    if (e.key === 'Escape') {
+      if (e.target.id === 'popText') hidePopover();
+      else e.target.blur();
+    }
     return;
   }
   if (e.key === '?' || e.key === 'F1') {
@@ -458,6 +685,7 @@ document.addEventListener('keydown', (e) => {
     overlay.classList.contains('open') ? closeHelp() : openHelp();
   } else if (e.key === 'Escape') {
     if (overlay.classList.contains('open')) closeHelp();
+    else if (!$('popover').hidden) hidePopover();
     else clearSelection();
   } else if (e.key === 'F5') {
     e.preventDefault();
@@ -475,7 +703,10 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     setView(true);
   } else if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.altKey && selRange()) {
-    toast('エージェントフィードバックは Phase 2 で実装予定です');
+    e.preventDefault();
+    openPopover();
+  } else if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.altKey) {
+    jumpNextThread();
   }
 });
 

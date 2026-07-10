@@ -204,6 +204,77 @@ kbd {
 .fold-row:hover { color: var(--accent); }
 .fold-row .rule { flex: 1; border-top: 1px dashed var(--line); }
 
+/* ---------- agent feedback: notes ---------- */
+.note-block {
+  margin: 6px 16px 10px 64px; max-width: 640px;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0; background: var(--accent-softer);
+  font-family: var(--ui); white-space: normal; user-select: text;
+}
+.after-only .note-block { margin-left: 64px; }
+.note-entry { padding: 8px 14px 10px; }
+.note-entry + .note-entry { border-top: 1px solid var(--line); }
+.note-entry .who {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11.5px; color: var(--muted); margin-bottom: 3px;
+}
+.note-entry .who .you { color: var(--accent); font-weight: 700; }
+.agent-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--add); flex: none; }
+.note-entry .nbody { font-size: 12.5px; line-height: 1.65; overflow-wrap: anywhere; }
+.note-entry .nbody.folded {
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+.note-more {
+  background: none; border: none; color: var(--accent); font-size: 11.5px;
+  cursor: pointer; padding: 2px 0 0; font-family: var(--ui);
+}
+.note-pending {
+  padding: 8px 14px 10px; font-size: 12px; color: var(--muted);
+  border-top: 1px solid var(--line); display: flex; align-items: center; gap: 8px;
+}
+.pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; flex: none; }
+@keyframes pulse { 50% { opacity: 0.25; } }
+
+/* ---------- agent feedback: input ---------- */
+.float-comment {
+  position: absolute; z-index: 5;
+  background: var(--accent); color: var(--on-accent);
+  border: none; border-radius: 6px; padding: 5px 12px;
+  font-family: var(--ui); font-size: 12px; font-weight: 600; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+.float-comment kbd { border-color: transparent; background: rgba(255, 255, 255, 0.25); color: inherit; margin-left: 4px; }
+.popover {
+  position: absolute; z-index: 6; width: 440px; max-width: calc(100% - 90px);
+  background: var(--chrome); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow); font-family: var(--ui); white-space: normal;
+}
+.pop-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px 0; }
+.kind-seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.kind-seg button {
+  font-size: 11.5px; padding: 3px 12px; background: var(--panel); border: none;
+  color: var(--muted); cursor: pointer; font-family: var(--ui);
+}
+.kind-seg button + button { border-left: 1px solid var(--line); }
+.kind-seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.pop-lines { font-family: var(--code); font-size: 11px; color: var(--muted); }
+.popover textarea {
+  display: block; width: calc(100% - 28px); margin: 10px 14px 0;
+  min-height: 74px; resize: vertical;
+  background: var(--editor); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+  font-family: var(--ui); font-size: 12.5px; line-height: 1.6;
+}
+.popover textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.pop-foot { display: flex; align-items: center; gap: 10px; padding: 9px 14px 12px; }
+.pop-foot .hint { font-size: 11px; color: var(--muted); flex: 1; }
+.send-btn {
+  background: var(--accent); color: var(--on-accent); border: none; border-radius: 6px;
+  padding: 6px 16px; font-family: var(--ui); font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.send-btn:hover { filter: brightness(1.07); }
+.send-btn:disabled { opacity: 0.5; cursor: default; }
+
 /* ---------- empty state ---------- */
 .empty-state {
   position: absolute; inset: 0; display: none;

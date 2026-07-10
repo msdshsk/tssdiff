@@ -5,11 +5,13 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use tauri::State;
+use tssdiff_core::agent::{AgentSession, FeedbackKind};
+use tssdiff_core::config::Config;
 use tssdiff_core::git::GitExecutor;
 use tssdiff_core::highlight;
 use tssdiff_core::mode::OperationMode;
 use tssdiff_core::parser::{DiffParser, FileDiff};
-use tssdiff_core::side_by_side::{self, RowKind};
+use tssdiff_core::side_by_side::{self, AlignedRow, RowKind};
 
 /// Highlighting cap, mirroring the TUI's full-view cap: rows past this
 /// line simply render unhighlighted
@@ -22,6 +24,13 @@ struct AppState {
     files: Mutex<Vec<FileDiff>>,
     /// Repo suggested at launch (CLI arg or the invocation directory)
     initial_path: Mutex<Option<String>>,
+    /// Agent feedback session for the opened repo
+    session: Mutex<Option<AgentSession>>,
+    /// Core config (shared with the TUI: ~/.config/tssdiff/config.yaml)
+    config: Mutex<Option<Config>>,
+    /// Aligned rows of the file currently shown, for selections/anchors
+    current_rows: Mutex<Vec<AlignedRow>>,
+    current_file: Mutex<Option<String>>,
 }
 
 #[derive(Serialize)]
@@ -54,9 +63,43 @@ struct RowOut {
 }
 
 #[derive(Serialize)]
+struct NoteOut {
+    /// Index of the aligned row this note anchors to, if visible
+    row: Option<usize>,
+    author: String,
+    body: String,
+    old_line: Option<usize>,
+    new_line: Option<usize>,
+    /// Feedback id this note belongs to (own notes carry their payload
+    /// id; agent replies reference the question they answer)
+    reply_to: Option<String>,
+}
+
+#[derive(Serialize)]
 struct DiffOut {
     rows: Vec<RowOut>,
     highlighted: bool,
+    notes: Vec<NoteOut>,
+}
+
+#[derive(Serialize)]
+struct NotesOut {
+    /// Notes anchored to the currently shown file
+    notes: Vec<NoteOut>,
+    /// Session-wide counts for the status bar
+    sent: usize,
+    replies: usize,
+}
+
+#[derive(Serialize)]
+struct SendOut {
+    /// Sink status line, e.g. "copied to clipboard"
+    status: String,
+    /// Payload id, used by the frontend to track awaited replies
+    id: String,
+    notes: Vec<NoteOut>,
+    sent: usize,
+    replies: usize,
 }
 
 fn mode_from(mode: &str) -> OperationMode {
@@ -83,7 +126,7 @@ fn initial_repo(state: State<AppState>) -> Option<String> {
 }
 
 #[tauri::command]
-fn open_repo(path: String) -> Result<RepoInfo, String> {
+fn open_repo(path: String, state: State<AppState>) -> Result<RepoInfo, String> {
     let dir = PathBuf::from(&path);
     std::env::set_current_dir(&dir).map_err(|e| format!("フォルダを開けません: {e}"))?;
     if !GitExecutor::is_git_repo() {
@@ -92,6 +135,12 @@ fn open_repo(path: String) -> Result<RepoInfo, String> {
     let root = GitExecutor::toplevel().map_err(|e| e.to_string())?;
     std::env::set_current_dir(&root).map_err(|e| e.to_string())?;
     let branch = git_branch().unwrap_or_else(|| "?".to_string());
+
+    *state.session.lock().unwrap() = Some(AgentSession::new(root.clone()));
+    *state.config.lock().unwrap() = Some(Config::load().map_err(|e| e.to_string())?);
+    *state.current_file.lock().unwrap() = None;
+    state.current_rows.lock().unwrap().clear();
+
     Ok(RepoInfo {
         root: root.display().to_string(),
         branch,
@@ -150,7 +199,7 @@ fn load_diff(
         None => (None, None),
     };
 
-    let rows = rows
+    let rows_out = rows
         .iter()
         .map(|row| {
             let kind = match row.kind {
@@ -169,7 +218,121 @@ fn load_diff(
         })
         .collect();
 
-    Ok(DiffOut { rows, highlighted })
+    let notes = anchored_notes(&state, &path, &rows);
+    *state.current_rows.lock().unwrap() = rows;
+    *state.current_file.lock().unwrap() = Some(path);
+
+    Ok(DiffOut {
+        rows: rows_out,
+        highlighted,
+        notes,
+    })
+}
+
+/// Notes of `file` mapped onto row indices of the given alignment
+fn map_notes(session: &AgentSession, file: &str, rows: &[AlignedRow]) -> Vec<NoteOut> {
+    let file_norm = file.replace('\\', "/");
+    session
+        .notes
+        .iter()
+        .filter(|n| n.file == file_norm)
+        .map(|n| NoteOut {
+            row: rows.iter().position(|row| n.anchors_to(row)),
+            author: n.author.clone(),
+            body: n.body.clone(),
+            old_line: n.old_line,
+            new_line: n.new_line,
+            reply_to: n.reply_to.clone(),
+        })
+        .collect()
+}
+
+fn anchored_notes(state: &State<AppState>, file: &str, rows: &[AlignedRow]) -> Vec<NoteOut> {
+    let session = state.session.lock().unwrap();
+    match session.as_ref() {
+        Some(session) => map_notes(session, file, rows),
+        None => Vec::new(),
+    }
+}
+
+fn note_counts(session: &AgentSession) -> (usize, usize) {
+    let sent = session.notes.iter().filter(|n| n.author == "you").count();
+    (sent, session.notes.len() - sent)
+}
+
+#[tauri::command]
+fn send_feedback(
+    kind: String,
+    comment: String,
+    sel_start: usize,
+    sel_end: usize,
+    state: State<AppState>,
+) -> Result<SendOut, String> {
+    let file = state
+        .current_file
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("ファイルが選択されていません")?;
+    let rows = state.current_rows.lock().unwrap().clone();
+    if rows.is_empty() {
+        return Err("diff が読み込まれていません".to_string());
+    }
+    let config = state
+        .config
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("設定が読み込まれていません")?;
+
+    let kind = if kind == "question" {
+        FeedbackKind::Question
+    } else {
+        FeedbackKind::Comment
+    };
+
+    let mut session_guard = state.session.lock().unwrap();
+    let session = session_guard.as_mut().ok_or("セッションがありません")?;
+    let payload = session.build_payload(kind, &file, &rows, sel_start, sel_end, &comment);
+    let status = session.send(&config.agent, &payload).map_err(|e| e.to_string())?;
+
+    let notes = map_notes(session, &file, &rows);
+    let (sent, replies) = note_counts(session);
+
+    Ok(SendOut {
+        status,
+        id: payload.id,
+        notes,
+        sent,
+        replies,
+    })
+}
+
+#[tauri::command]
+fn poll_notes(state: State<AppState>) -> Result<NotesOut, String> {
+    let mut session_guard = state.session.lock().unwrap();
+    let Some(session) = session_guard.as_mut() else {
+        return Ok(NotesOut {
+            notes: Vec::new(),
+            sent: 0,
+            replies: 0,
+        });
+    };
+    session.poll_replies();
+    let (sent, replies) = note_counts(session);
+
+    let file = state.current_file.lock().unwrap().clone();
+    let rows = state.current_rows.lock().unwrap();
+    let notes = match file {
+        Some(file) => map_notes(session, &file, &rows),
+        None => Vec::new(),
+    };
+
+    Ok(NotesOut {
+        notes,
+        sent,
+        replies,
+    })
 }
 
 /// Segments of one display line: syntax colors when the highlighter
@@ -203,14 +366,16 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
-            files: Mutex::new(Vec::new()),
             initial_path: Mutex::new(initial),
+            ..Default::default()
         })
         .invoke_handler(tauri::generate_handler![
             initial_repo,
             open_repo,
             load_files,
-            load_diff
+            load_diff,
+            send_feedback,
+            poll_notes
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

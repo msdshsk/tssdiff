@@ -64,6 +64,21 @@
     </div>
     <div class="diff-scroll" id="diffScroll">
       <div id="diffBody"></div>
+      <button class="float-comment" id="floatComment" hidden>コメントを書く <kbd>C</kbd></button>
+      <div class="popover" id="popover" hidden>
+        <div class="pop-head">
+          <div class="kind-seg" id="kindSeg">
+            <button aria-pressed="true" data-kind="comment">コメント</button>
+            <button aria-pressed="false" data-kind="question">質問</button>
+          </div>
+          <span class="pop-lines" id="popLines"></span>
+        </div>
+        <textarea id="popText" placeholder="エージェントへの伝言。選択範囲の diff が excerpt として自動添付されます"></textarea>
+        <div class="pop-foot">
+          <span class="hint"><kbd>Ctrl+Enter</kbd> 送信 · <kbd>Tab</kbd> 種別切替 · <kbd>Esc</kbd> 取消</span>
+          <button class="send-btn" id="popSend">エージェントに送信</button>
+        </div>
+      </div>
       <div class="empty-state" id="emptyState">
         <div class="app-glyph big">±</div>
         <h2 id="emptyTitle">リポジトリを開いてください</h2>
@@ -82,6 +97,7 @@
   <span class="seg" id="sbMode">Working Tree</span>
   <span class="seg" id="sbFile"></span>
   <div class="spacer"></div>
+  <span class="seg" id="sbNotes" hidden></span>
   <span class="seg keyhint" id="btnHelp"><kbd>?</kbd> ショートカット</span>
 </div>
 
