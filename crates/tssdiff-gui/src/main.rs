@@ -211,8 +211,10 @@ fn open_in_editor(path: String, state: State<AppState>) -> Result<String, String
     // No configured editor: use a safe plain-text editor rather than
     // the shell association - `start` would *execute* .js/.ps1 files
     let editor = if editor.trim().is_empty() {
-        if cfg!(windows) {
+        if cfg!(target_os = "windows") {
             "notepad".to_string()
+        } else if cfg!(target_os = "macos") {
+            "open -t".to_string()
         } else {
             "xdg-open".to_string()
         }
@@ -231,55 +233,115 @@ fn open_in_editor(path: String, state: State<AppState>) -> Result<String, String
         .map_err(|e| format!("エディタを起動できません ({program}): {e}"))
 }
 
-/// Editors worth probing for, in preference order
+/// Editors worth probing for, in preference order, per platform
 fn detect_editors() -> Vec<EditorCandidate> {
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    let known: [(&str, String); 10] = [
-        (
-            "Visual Studio Code",
-            format!("{local}\\Programs\\Microsoft VS Code\\Code.exe"),
-        ),
-        ("Cursor", format!("{local}\\Programs\\cursor\\Cursor.exe")),
-        ("Zed", format!("{local}\\Programs\\Zed\\Zed.exe")),
-        ("Zed", format!("{local}\\Zed\\Zed.exe")),
-        (
-            "EmEditor",
-            format!("{local}\\Programs\\EmEditor\\EmEditor.exe"),
-        ),
-        (
-            "EmEditor",
-            "C:\\Program Files\\EmEditor\\EmEditor.exe".to_string(),
-        ),
-        (
-            "Notepad++",
-            "C:\\Program Files\\Notepad++\\notepad++.exe".to_string(),
-        ),
-        (
-            "Notepad++ (x86)",
-            "C:\\Program Files (x86)\\Notepad++\\notepad++.exe".to_string(),
-        ),
-        (
-            "Sublime Text",
-            "C:\\Program Files\\Sublime Text\\sublime_text.exe".to_string(),
-        ),
-        (
-            "VSCodium",
-            format!("{local}\\Programs\\VSCodium\\VSCodium.exe"),
-        ),
-    ];
-    let mut out: Vec<EditorCandidate> = known
-        .into_iter()
-        .filter(|(_, path)| std::path::Path::new(path).exists())
-        .map(|(label, path)| EditorCandidate {
-            label: label.to_string(),
-            command: format!("\"{path}\""),
-        })
-        .collect();
-    out.push(EditorCandidate {
-        label: "メモ帳 (notepad)".to_string(),
-        command: "notepad".to_string(),
-    });
+    let mut out: Vec<EditorCandidate> = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let known: [(&str, String); 10] = [
+            (
+                "Visual Studio Code",
+                format!("{local}\\Programs\\Microsoft VS Code\\Code.exe"),
+            ),
+            ("Cursor", format!("{local}\\Programs\\cursor\\Cursor.exe")),
+            ("Zed", format!("{local}\\Programs\\Zed\\Zed.exe")),
+            ("Zed", format!("{local}\\Zed\\Zed.exe")),
+            (
+                "EmEditor",
+                format!("{local}\\Programs\\EmEditor\\EmEditor.exe"),
+            ),
+            (
+                "EmEditor",
+                "C:\\Program Files\\EmEditor\\EmEditor.exe".to_string(),
+            ),
+            (
+                "Notepad++",
+                "C:\\Program Files\\Notepad++\\notepad++.exe".to_string(),
+            ),
+            (
+                "Notepad++ (x86)",
+                "C:\\Program Files (x86)\\Notepad++\\notepad++.exe".to_string(),
+            ),
+            (
+                "Sublime Text",
+                "C:\\Program Files\\Sublime Text\\sublime_text.exe".to_string(),
+            ),
+            (
+                "VSCodium",
+                format!("{local}\\Programs\\VSCodium\\VSCodium.exe"),
+            ),
+        ];
+        out.extend(
+            known
+                .into_iter()
+                .filter(|(_, path)| std::path::Path::new(path).exists())
+                .map(|(label, path)| EditorCandidate {
+                    label: label.to_string(),
+                    command: format!("\"{path}\""),
+                }),
+        );
+        out.push(EditorCandidate {
+            label: "メモ帳 (notepad)".to_string(),
+            command: "notepad".to_string(),
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for (label, app) in [
+            ("Visual Studio Code", "Visual Studio Code"),
+            ("Cursor", "Cursor"),
+            ("Zed", "Zed"),
+            ("Sublime Text", "Sublime Text"),
+            ("CotEditor", "CotEditor"),
+        ] {
+            if std::path::Path::new(&format!("/Applications/{app}.app")).exists() {
+                out.push(EditorCandidate {
+                    label: label.to_string(),
+                    command: format!("open -a \"{app}\""),
+                });
+            }
+        }
+        out.push(EditorCandidate {
+            label: "既定のテキストエディタ".to_string(),
+            command: "open -t".to_string(),
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for (label, bin) in [
+            ("Visual Studio Code", "code"),
+            ("Cursor", "cursor"),
+            ("Zed", "zed"),
+            ("Sublime Text", "subl"),
+            ("gedit", "gedit"),
+            ("Kate", "kate"),
+        ] {
+            if on_path(bin) {
+                out.push(EditorCandidate {
+                    label: label.to_string(),
+                    command: bin.to_string(),
+                });
+            }
+        }
+        out.push(EditorCandidate {
+            label: "OS 既定".to_string(),
+            command: "xdg-open".to_string(),
+        });
+    }
+
     out
+}
+
+/// Whether an executable of this name exists on PATH
+#[cfg(target_os = "linux")]
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).exists()))
+        .unwrap_or(false)
 }
 
 #[tauri::command]

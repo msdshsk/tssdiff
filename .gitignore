@@ -38,3 +38,6 @@ config.yaml
 !config.example.yaml
 # Tauri generated schemas
 crates/tssdiff-gui/gen/
+
+# GUI installer sidecar staging
+crates/tssdiff-gui/binaries/

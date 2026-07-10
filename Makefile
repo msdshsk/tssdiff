@@ -17,10 +17,16 @@ install:
 install-gui:
 	cargo install --path crates/tssdiff-gui
 
-# NSIS installer for the desktop GUI (requires cargo-tauri:
-#   cargo install tauri-cli --locked)
+# NSIS installer bundling the GUI plus the TUI as a sidecar. The
+# sidecar is injected via a config overlay so regular builds don't
+# require the staged binary. (requires: cargo install tauri-cli --locked)
+TARGET_TRIPLE ?= x86_64-pc-windows-msvc
+
 installer:
-	cd crates/tssdiff-gui && cargo tauri build
+	cargo build --release -p tssdiff
+	mkdir -p crates/tssdiff-gui/binaries
+	cp target/release/tssdiff.exe crates/tssdiff-gui/binaries/tssdiff-$(TARGET_TRIPLE).exe
+	cd crates/tssdiff-gui && cargo tauri build --config '{"bundle":{"externalBin":["binaries/tssdiff"]}}'
 
 # Development targets
 test:
