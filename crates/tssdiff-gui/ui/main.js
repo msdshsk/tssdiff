@@ -129,13 +129,16 @@ function showBinary(path) {
 /// soft: keep the current file, scroll position, folds, and selection
 /// (used by watch/F5 refreshes so external edits don't yank the view)
 async function loadFiles(soft) {
+  let files;
   try {
-    state.files = await invoke('load_files', { mode: state.mode });
+    files = await invoke('load_files', { mode: state.mode });
   } catch (e) {
     toast(String(e));
-    state.files = [];
+    files = [];
   }
-  renderTree();
+  const unchanged = JSON.stringify(files) === JSON.stringify(state.files);
+  state.files = files;
+  if (!(soft && unchanged)) renderTree();
 
   const totalA = state.files.reduce((s, f) => s + f.added, 0);
   const totalD = state.files.reduce((s, f) => s + f.removed, 0);
@@ -250,6 +253,10 @@ async function loadDiff(path, keepScroll) {
     showBinary(path);
     return;
   }
+  const unchanged =
+    keepScroll &&
+    JSON.stringify(out.rows) === JSON.stringify(state.rows) &&
+    JSON.stringify(out.notes) === JSON.stringify(state.notes);
   state.rows = out.rows;
   state.notes = out.notes;
   updateAwaiting();
@@ -258,7 +265,7 @@ async function loadDiff(path, keepScroll) {
   $('fileHead').hidden = false;
   $('fhPath').textContent = path;
   $('fhStat').innerHTML = f ? `<span class="a">+${f.added}</span> <span class="d">−${f.removed}</span>` : '';
-  renderDiff();
+  if (!unchanged) renderDiff();
   if (!keepScroll) $('diffScroll').scrollTop = 0;
 }
 
@@ -966,16 +973,21 @@ $('modeTabs').addEventListener('click', (e) => {
 
 /* ---------- history (commit list) ---------- */
 async function loadCommits() {
+  let commits;
   try {
-    state.commits = await invoke('load_commits');
+    commits = await invoke('load_commits');
   } catch (e) {
     toast(String(e));
-    state.commits = [];
+    commits = [];
   }
+  // unchanged history: skip the re-render so watch refreshes don't
+  // rebuild the DOM under the user's cursor (lost clicks, flicker)
+  const unchanged = JSON.stringify(commits) === JSON.stringify(state.commits);
+  state.commits = commits;
   $('commitStat').textContent = state.commits.length
     ? `${state.commits.length}${state.commits.length >= 300 ? '+' : ''} commits`
     : '';
-  renderCommits();
+  if (!unchanged) renderCommits();
 }
 
 /* Lane assignment for the commit graph: each lane carries the hash it

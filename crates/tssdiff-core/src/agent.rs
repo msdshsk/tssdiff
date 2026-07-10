@@ -371,7 +371,17 @@ fn send_command(config: &AgentConfig, payload: &FeedbackPayload) -> Result<Strin
     let mut parts = command_str.split_whitespace();
     let program = parts.next().unwrap();
 
-    let mut child = Command::new(program)
+    // The sink contract is non-interactive; on Windows keep the spawn
+    // from flashing a console when the caller is a GUI-subsystem app
+    #[allow(unused_mut)]
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
         .args(parts)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

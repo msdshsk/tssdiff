@@ -26,6 +26,21 @@ pub struct GraphRow {
     pub subject: String,
 }
 
+/// git invocation that never flashes a console window: on Windows a
+/// GUI-subsystem process otherwise spawns a visible console for every
+/// git.exe call
+pub(crate) fn git_command() -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Git command executor for getting diff data
 #[derive(Default)]
 pub struct GitExecutor;
@@ -37,7 +52,7 @@ impl GitExecutor {
 
     /// Check if we're in a git repository
     pub fn is_git_repo() -> bool {
-        Command::new("git")
+        git_command()
             .args(["rev-parse", "--git-dir"])
             .output()
             .map(|output| output.status.success())
@@ -152,7 +167,7 @@ impl GitExecutor {
 
     /// Execute git diff command
     fn execute_git_diff(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(args)
             .output()
             .context("Failed to execute git diff")?;
@@ -168,7 +183,7 @@ impl GitExecutor {
     /// Execute git command to get file names only
     #[allow(dead_code)]
     fn execute_git_name_only(&self, args: &[&str]) -> Result<Vec<String>> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(args)
             .output()
             .context("Failed to execute git diff --name-only")?;
@@ -201,7 +216,7 @@ impl GitExecutor {
         let target1 = path1.replace('\\', "/");
         let target2 = path2.replace('\\', "/");
 
-        let mut cmd = Command::new("git");
+        let mut cmd = git_command();
         cmd.args(["diff", "--no-index", "--", &target1, &target2]);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
@@ -303,7 +318,7 @@ impl GitExecutor {
     /// Blob content at `<rev>:<path>`; empty when the path is absent in
     /// that revision (created or deleted file)
     fn show_blob_or_empty(&self, spec: &str) -> Result<String> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["show", spec])
             .output()
             .context("Failed to execute git show")?;
@@ -332,7 +347,7 @@ impl GitExecutor {
     }
 
     fn get_commit_log_in(dir: &Path, limit: usize) -> Result<Vec<CommitInfo>> {
-        let output = Command::new("git")
+        let output = git_command()
             .args([
                 "log",
                 // children before parents, so graph edges never dangle
@@ -377,7 +392,7 @@ impl GitExecutor {
     }
 
     fn get_commit_graph_in(dir: &Path, limit: usize) -> Result<Vec<GraphRow>> {
-        let output = Command::new("git")
+        let output = git_command()
             .args([
                 "log",
                 "--graph",
@@ -425,7 +440,7 @@ impl GitExecutor {
 
     /// Commit header, message, and diffstat (no patch) for previews
     pub fn get_commit_summary(&self, commit: &str) -> Result<String> {
-        let output = Command::new("git")
+        let output = git_command()
             .args([
                 "show",
                 "--stat",
@@ -450,7 +465,7 @@ impl GitExecutor {
     }
 
     fn staged_files_in(repo_root: &Path) -> Result<std::collections::HashSet<String>> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["diff", "--cached", "--name-only"])
             .current_dir(repo_root)
             .output()
@@ -478,7 +493,7 @@ impl GitExecutor {
         if paths.is_empty() {
             return Ok(());
         }
-        let output = Command::new("git")
+        let output = git_command()
             .args(["add", "--"])
             .args(paths)
             .current_dir(repo_root)
@@ -501,7 +516,7 @@ impl GitExecutor {
         if paths.is_empty() {
             return Ok(());
         }
-        let output = Command::new("git")
+        let output = git_command()
             .args(["restore", "--staged", "--"])
             .args(paths)
             .current_dir(repo_root)
@@ -521,7 +536,7 @@ impl GitExecutor {
     }
 
     fn commit_in(repo_root: &Path, message: &str) -> Result<String> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["commit", "-m", message])
             .current_dir(repo_root)
             .output()
@@ -538,7 +553,7 @@ impl GitExecutor {
 
     /// Short working-tree status for the history preview
     pub fn get_status_summary(&self) -> Result<String> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["status", "--short", "--branch"])
             .output()
             .context("Failed to execute git status")?;
@@ -555,7 +570,7 @@ impl GitExecutor {
     /// empty tree for a root commit
     fn commit_diff_base(&self, commit: &str) -> String {
         let parent = format!("{commit}^");
-        let has_parent = Command::new("git")
+        let has_parent = git_command()
             .args(["rev-parse", "--verify", "--quiet", &parent])
             .output()
             .map(|output| output.status.success())
@@ -570,7 +585,7 @@ impl GitExecutor {
 
     /// Repository root of the current working directory
     pub fn toplevel() -> Result<PathBuf> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["rev-parse", "--show-toplevel"])
             .output()
             .context("Failed to locate repository root")?;
@@ -630,7 +645,7 @@ impl GitExecutor {
 
     /// Untracked files (recursive, .gitignore respected), relative to repo_root
     fn list_untracked_in(repo_root: &Path) -> Result<Vec<String>> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["ls-files", "--others", "--exclude-standard"])
             .current_dir(repo_root)
             .output()
@@ -653,7 +668,7 @@ impl GitExecutor {
     fn untracked_file_diff(&self, file_path: &str) -> Result<String> {
         let repo_root = Self::toplevel()?;
 
-        let tracked = Command::new("git")
+        let tracked = git_command()
             .args(["ls-files", "--error-unmatch", "--", file_path])
             .current_dir(&repo_root)
             .output()
@@ -674,7 +689,7 @@ impl GitExecutor {
         }
 
         // Check if git can resolve it as a ref
-        let output = Command::new("git")
+        let output = git_command()
             .args(["rev-parse", "--verify", ref_name])
             .output()
             .context("Failed to check git ref")?;

@@ -4,16 +4,15 @@
 //! through `git.backend` in the config: auto / cli / pure.
 
 use crate::config::GitBackendKind;
-use crate::git::{CommitInfo, GitExecutor};
+use crate::git::{CommitInfo, GitExecutor, git_command};
 use crate::mode::OperationMode;
 use crate::parser::{DiffParser, FileDiff};
 use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Version string when the git CLI is on PATH, None otherwise
 pub fn git_cli_version() -> Option<String> {
-    let out = Command::new("git").arg("--version").output().ok()?;
+    let out = git_command().arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -28,8 +27,9 @@ pub enum RepoBackend {
 }
 
 impl RepoBackend {
-    /// Open `dir` with the requested backend. Auto prefers the git CLI
-    /// and falls back to the built-in backend when git is missing.
+    /// Open `dir` with the requested backend. Auto prefers the built-in
+    /// gix backend (no process spawns, works without git) and falls
+    /// back to the git CLI when the build lacks it or opening fails.
     ///
     /// The CLI backend operates on the process working directory, so
     /// callers must chdir into `dir` (or the repo root) beforehand.
@@ -37,13 +37,7 @@ impl RepoBackend {
         match kind {
             GitBackendKind::Cli => Self::open_cli(dir),
             GitBackendKind::Pure => Self::open_pure(dir),
-            GitBackendKind::Auto => {
-                if git_cli_version().is_some() {
-                    Self::open_cli(dir)
-                } else {
-                    Self::open_pure(dir)
-                }
-            }
+            GitBackendKind::Auto => Self::open_pure(dir).or_else(|_| Self::open_cli(dir)),
         }
     }
 
@@ -87,7 +81,7 @@ impl RepoBackend {
     pub fn branch(&self) -> Option<String> {
         match self {
             Self::Cli(_) => {
-                let out = Command::new("git")
+                let out = git_command()
                     .args(["rev-parse", "--abbrev-ref", "HEAD"])
                     .output()
                     .ok()?;

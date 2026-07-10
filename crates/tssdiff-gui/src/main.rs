@@ -566,6 +566,10 @@ fn start_watcher(
                 .is_ok()
             {}
             let _ = app.emit("repo-changed", ());
+            // absorb events the refresh itself causes (git refreshes
+            // the .git/index stat cache) so it cannot self-loop
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            while rx.try_recv().is_ok() {}
         }
     });
     Ok(())
