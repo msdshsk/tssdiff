@@ -627,7 +627,15 @@ async function copyText(text, what) {
 
 function openInEditor(path) {
   if (!path) return;
-  invoke('open_in_editor', { path }).catch((e) => toast(String(e)));
+  invoke('open_in_editor', { path })
+    .then((program) =>
+      toast(
+        program === 'notepad'
+          ? 'notepad で開きました(config.yaml の editor で変更できます)'
+          : program + ' で開きました'
+      )
+    )
+    .catch((e) => toast(String(e)));
 }
 
 function diffRowMenu(drow) {

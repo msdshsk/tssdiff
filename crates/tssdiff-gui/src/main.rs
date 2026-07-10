@@ -126,12 +126,31 @@ fn mode_from(mode: &str) -> OperationMode {
     }
 }
 
-/// Absolute path of a repo-relative file (cwd is the repo root)
+/// Human-friendly absolute path: strips Windows' verbatim prefix
+/// (\\?\ paths reject forward slashes and read poorly in the UI) and
+/// uses native separators
+fn friendly_path(p: &std::path::Path) -> String {
+    let s = p.display().to_string();
+    let s = s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s);
+    if cfg!(windows) {
+        s.replace('/', "\\")
+    } else {
+        s
+    }
+}
+
+/// Absolute path of a repo-relative file (cwd is the repo root).
+/// Separators are normalized so the result stays valid even when the
+/// cwd is a verbatim path
 fn abs_repo_path(path: &str) -> Result<PathBuf, String> {
-    let abs = std::env::current_dir()
+    let rel = if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    };
+    Ok(std::env::current_dir()
         .map_err(|e| e.to_string())?
-        .join(path);
-    Ok(abs)
+        .join(rel))
 }
 
 #[tauri::command]
@@ -140,11 +159,16 @@ fn copy_text(text: String) -> Result<(), String> {
     clipboard.set_text(text).map_err(|e| e.to_string())
 }
 
+/// Opens the file and returns the editor program used, so the
+/// frontend can name it in the confirmation toast
 #[tauri::command]
-fn open_in_editor(path: String, state: State<AppState>) -> Result<(), String> {
+fn open_in_editor(path: String, state: State<AppState>) -> Result<String, String> {
     let abs = abs_repo_path(&path)?;
     if !abs.exists() {
-        return Err(format!("ファイルが存在しません: {path}"));
+        return Err(format!(
+            "ファイルがワークツリーに存在しません(削除済み・コミット内のファイルは開けません): {}",
+            friendly_path(&abs)
+        ));
     }
     let configured = state
         .config
@@ -158,38 +182,50 @@ fn open_in_editor(path: String, state: State<AppState>) -> Result<(), String> {
     } else {
         configured
     };
-    if editor.trim().is_empty() {
-        return open_with_default(&abs);
-    }
-    let mut parts = editor.split_whitespace();
-    let program = parts.next().unwrap();
-    std::process::Command::new(program)
+    // No configured editor: use a safe plain-text editor rather than
+    // the shell association - `start` would *execute* .js/.ps1 files
+    let editor = if editor.trim().is_empty() {
+        if cfg!(windows) {
+            "notepad".to_string()
+        } else {
+            "xdg-open".to_string()
+        }
+    } else {
+        editor
+    };
+    let mut parts = split_command(&editor).into_iter();
+    let program = parts
+        .next()
+        .ok_or_else(|| "エディタ設定が空です".to_string())?;
+    std::process::Command::new(&program)
         .args(parts)
         .arg(&abs)
         .spawn()
-        .map(|_| ())
+        .map(|_| program.clone())
         .map_err(|e| format!("エディタを起動できません ({program}): {e}"))
 }
 
-/// Open with the OS-associated application
-fn open_with_default(path: &std::path::Path) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+/// Split an editor command line, honoring double quotes so paths with
+/// spaces ("C:\Program Files\...") survive
+fn split_command(line: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for c in line.chars() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
     }
-    #[cfg(not(windows))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+    if !current.is_empty() {
+        parts.push(current);
     }
+    parts
 }
 
 #[tauri::command]
@@ -268,19 +304,21 @@ fn open_repo(path: String, state: State<AppState>) -> Result<RepoInfo, String> {
     let config = Config::load().map_err(|e| e.to_string())?;
     let kind = backend_kind_override().unwrap_or(config.git.backend);
     let backend = RepoBackend::open(&dir, kind).map_err(|e| e.to_string())?;
-    let root = backend.toplevel().map_err(|e| e.to_string())?;
+    // normalized form: gix may hand back a \\?\ verbatim path and the
+    // git CLI a forward-slash one; both break joins/display later
+    let root = friendly_path(&backend.toplevel().map_err(|e| e.to_string())?);
     std::env::set_current_dir(&root).map_err(|e| e.to_string())?;
     let branch = backend.branch().unwrap_or_else(|| "?".to_string());
     let backend_name = backend.name().to_string();
 
-    *state.session.lock().unwrap() = Some(AgentSession::new(root.clone()));
+    *state.session.lock().unwrap() = Some(AgentSession::new(PathBuf::from(&root)));
     *state.config.lock().unwrap() = Some(config);
     *state.backend.lock().unwrap() = Some(backend);
     *state.current_file.lock().unwrap() = None;
     state.current_rows.lock().unwrap().clear();
 
     Ok(RepoInfo {
-        root: root.display().to_string(),
+        root,
         branch,
         backend: backend_name,
     })
@@ -527,7 +565,7 @@ fn main() {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .and_then(|p| std::fs::canonicalize(p).ok())
-        .map(|p| p.display().to_string());
+        .map(|p| friendly_path(&p));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
