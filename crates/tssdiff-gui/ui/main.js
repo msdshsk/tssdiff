@@ -644,6 +644,95 @@ function openInEditor(path) {
     .catch((e) => toast(String(e)));
 }
 
+/* ---------- settings panel ---------- */
+const settingsSel = { backend: 'auto', sink: 'clipboard' };
+let settingsPrevBackend = 'auto';
+
+function setSeg(id, value) {
+  document.querySelectorAll('#' + id + ' button').forEach((b) =>
+    b.setAttribute('aria-pressed', String(b.dataset.v === value))
+  );
+}
+
+['setBackend', 'setSink'].forEach((id) => {
+  $(id).addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-v]');
+    if (!btn) return;
+    settingsSel[id === 'setBackend' ? 'backend' : 'sink'] = btn.dataset.v;
+    setSeg(id, btn.dataset.v);
+  });
+});
+
+async function openSettings() {
+  try {
+    const s = await invoke('get_settings');
+    $('setEditor').value = s.editor;
+    settingsSel.backend = s.backend;
+    settingsSel.sink = s.sink;
+    settingsPrevBackend = s.backend;
+    setSeg('setBackend', s.backend);
+    setSeg('setSink', s.sink);
+    $('setSinkCommand').value = s.sink_command;
+    const chips = $('setEditorChips');
+    chips.innerHTML = '';
+    for (const c of s.candidates) {
+      const chip = document.createElement('button');
+      chip.className = 'chip';
+      chip.textContent = c.label;
+      chip.title = c.command;
+      chip.addEventListener('click', () => {
+        $('setEditor').value = c.command;
+      });
+      chips.appendChild(chip);
+    }
+    $('settingsOverlay').classList.add('open');
+  } catch (e) {
+    toast(String(e));
+  }
+}
+
+function closeSettings() {
+  $('settingsOverlay').classList.remove('open');
+}
+
+async function saveSettings() {
+  try {
+    await invoke('save_settings', {
+      editor: $('setEditor').value,
+      backend: settingsSel.backend,
+      sink: settingsSel.sink,
+      sinkCommand: $('setSinkCommand').value,
+    });
+    closeSettings();
+    toast('設定を保存しました');
+    if (settingsSel.backend !== settingsPrevBackend && state.repo) {
+      // reopen so the backend change takes effect immediately
+      tryOpen(state.repo.root, false);
+    }
+  } catch (e) {
+    toast(String(e));
+  }
+}
+
+$('btnSettings').addEventListener('click', openSettings);
+$('settingsClose').addEventListener('click', closeSettings);
+$('settingsSave').addEventListener('click', saveSettings);
+$('settingsOverlay').addEventListener('click', (e) => {
+  if (e.target === $('settingsOverlay')) closeSettings();
+});
+$('setEditorClear').addEventListener('click', () => {
+  $('setEditor').value = '';
+});
+$('setEditorBrowse').addEventListener('click', async () => {
+  const picked = await invoke('plugin:dialog|open', {
+    options: {
+      title: 'エディタの実行ファイルを選択',
+      filters: [{ name: '実行ファイル', extensions: ['exe', 'cmd', 'bat'] }],
+    },
+  });
+  if (picked) $('setEditor').value = '"' + picked + '"';
+});
+
 /* ---------- editor picker: detect installed editors on first use ---------- */
 let pendingEditorPath = null;
 
@@ -786,18 +875,7 @@ function generalMenu() {
     },
     '-',
     { label: 'リポジトリを開く…', kbd: 'Ctrl+O', action: pickRepo },
-    {
-      label: 'エディタの設定…',
-      action: async () => {
-        pendingEditorPath = null;
-        try {
-          showEditorPicker((await invoke('editor_status')).candidates);
-        } catch (e) {
-          toast(String(e));
-        }
-      },
-      disabled: !state.repo,
-    },
+    { label: '設定…', kbd: 'Ctrl+,', action: openSettings },
     { label: 'ショートカット一覧', kbd: '?', action: openHelp },
   ];
 }
@@ -1115,6 +1193,7 @@ const KEYS = [
   { title: 'モード / アプリ', rows: [
     ['Alt+1 / 2 / 3', '', 'Working / Staged / History', false],
     ['Ctrl+O', '', 'リポジトリを開く', false],
+    ['Ctrl+,', '', '設定(エディタ / バックエンド / sink)', false],
     ['? または F1', '?', 'このショートカット一覧', false],
     ['Esc', '', '選択解除 / 閉じる', false],
   ]},
@@ -1156,10 +1235,14 @@ document.addEventListener('keydown', (e) => {
     overlay.classList.contains('open') ? closeHelp() : openHelp();
   } else if (e.key === 'Escape') {
     if (!ctxMenu.hidden) hideCtxMenu();
+    else if ($('settingsOverlay').classList.contains('open')) closeSettings();
     else if ($('editorOverlay').classList.contains('open')) closeEditorPicker();
     else if (overlay.classList.contains('open')) closeHelp();
     else if (!$('popover').hidden) hidePopover();
     else clearSelection();
+  } else if (e.ctrlKey && e.key === ',') {
+    e.preventDefault();
+    $('settingsOverlay').classList.contains('open') ? closeSettings() : openSettings();
   } else if (e.key === 'F5') {
     e.preventDefault();
     refreshAll();

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 use tssdiff_core::agent::{AgentSession, FeedbackKind};
-use tssdiff_core::config::{Config, GitBackendKind};
+use tssdiff_core::config::{Config, GitBackendKind, SinkKind};
 use tssdiff_core::highlight;
 use tssdiff_core::mode::OperationMode;
 use tssdiff_core::parser::FileDiff;
@@ -108,6 +108,15 @@ struct EditorCandidate {
 #[derive(Serialize)]
 struct EditorStatus {
     configured: bool,
+    candidates: Vec<EditorCandidate>,
+}
+
+#[derive(Serialize)]
+struct SettingsOut {
+    editor: String,
+    backend: String,
+    sink: String,
+    sink_command: String,
     candidates: Vec<EditorCandidate>,
 }
 
@@ -225,12 +234,18 @@ fn open_in_editor(path: String, state: State<AppState>) -> Result<String, String
 /// Editors worth probing for, in preference order
 fn detect_editors() -> Vec<EditorCandidate> {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    let known: [(&str, String); 6] = [
+    let known: [(&str, String); 9] = [
         (
             "Visual Studio Code",
             format!("{local}\\Programs\\Microsoft VS Code\\Code.exe"),
         ),
         ("Cursor", format!("{local}\\Programs\\cursor\\Cursor.exe")),
+        ("Zed", format!("{local}\\Programs\\Zed\\Zed.exe")),
+        ("Zed", format!("{local}\\Zed\\Zed.exe")),
+        (
+            "EmEditor",
+            "C:\\Program Files\\EmEditor\\EmEditor.exe".to_string(),
+        ),
         (
             "Notepad++",
             "C:\\Program Files\\Notepad++\\notepad++.exe".to_string(),
@@ -288,6 +303,66 @@ fn set_editor(command: String, state: State<AppState>) -> Result<(), String> {
     let mut config_guard = state.config.lock().unwrap();
     let config = config_guard.as_mut().ok_or("設定が読み込まれていません")?;
     config.editor = command;
+    config.save().map_err(|e| e.to_string())
+}
+
+/// Config loaded on demand so the settings panel also works before a
+/// repository is opened
+fn ensure_config(state: &State<AppState>) -> Result<(), String> {
+    let mut guard = state.config.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(Config::load().map_err(|e| e.to_string())?);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_settings(state: State<AppState>) -> Result<SettingsOut, String> {
+    ensure_config(&state)?;
+    let guard = state.config.lock().unwrap();
+    let config = guard.as_ref().unwrap();
+    Ok(SettingsOut {
+        editor: config.editor.clone(),
+        backend: match config.git.backend {
+            GitBackendKind::Auto => "auto",
+            GitBackendKind::Cli => "cli",
+            GitBackendKind::Pure => "pure",
+        }
+        .to_string(),
+        sink: match config.agent.sink {
+            SinkKind::Clipboard => "clipboard",
+            SinkKind::File => "file",
+            SinkKind::Command => "command",
+        }
+        .to_string(),
+        sink_command: config.agent.sink_command.clone(),
+        candidates: detect_editors(),
+    })
+}
+
+#[tauri::command]
+fn save_settings(
+    editor: String,
+    backend: String,
+    sink: String,
+    sink_command: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    ensure_config(&state)?;
+    let mut guard = state.config.lock().unwrap();
+    let config = guard.as_mut().unwrap();
+    config.editor = editor.trim().to_string();
+    config.git.backend = match backend.as_str() {
+        "cli" => GitBackendKind::Cli,
+        "pure" => GitBackendKind::Pure,
+        _ => GitBackendKind::Auto,
+    };
+    config.agent.sink = match sink.as_str() {
+        "file" => SinkKind::File,
+        "command" => SinkKind::Command,
+        _ => SinkKind::Clipboard,
+    };
+    config.agent.sink_command = sink_command.trim().to_string();
     config.save().map_err(|e| e.to_string())
 }
 
@@ -729,7 +804,9 @@ fn main() {
             open_in_editor,
             reveal_in_explorer,
             editor_status,
-            set_editor
+            set_editor,
+            get_settings,
+            save_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
