@@ -103,6 +103,7 @@
   </span>
   <span class="seg" id="sbMode">Working Tree</span>
   <span class="seg" id="sbBackend" hidden title="リポジトリアクセスのバックエンド"></span>
+  <span class="seg" id="sbWatch" hidden title="ファイル変更を監視して自動更新します"><span class="watch-dot"></span>watching</span>
   <span class="seg" id="sbFile"></span>
   <div class="spacer"></div>
   <span class="seg" id="sbNotes" hidden></span>
@@ -117,6 +118,18 @@
     </div>
     <p class="sheet-note"><span class="badge soon">予定</span> の付いたキーは今後のフェーズで実装されます。</p>
     <div class="keygrid" id="keyCards"></div>
+  </div>
+</div>
+
+<div class="overlay" id="editorOverlay" role="dialog" aria-modal="true" aria-label="エディタの設定">
+  <div class="sheet narrow">
+    <div class="sheet-head">
+      <h2>エディタの設定</h2>
+      <button class="sheet-close" id="editorClose" aria-label="閉じる">✕</button>
+    </div>
+    <p class="sheet-note">「エディタで開く」で使うエディタを選択してください。設定は config.yaml の <code>editor</code> に保存され、TUI 版と共有されます。</p>
+    <div class="editor-choices" id="editorChoices"></div>
+    <button class="ghost-btn" id="editorBrowse">実行ファイルを選択…</button>
   </div>
 </div>
 

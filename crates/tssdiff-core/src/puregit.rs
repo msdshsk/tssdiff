@@ -112,6 +112,10 @@ impl PureRepo {
                 hash: info.id.to_hex_with_len(7).to_string(),
                 date: format_time(time.seconds, time.offset),
                 subject: commit.message()?.summary().to_string(),
+                parents: commit
+                    .parent_ids()
+                    .map(|id| id.detach().to_hex_with_len(7).to_string())
+                    .collect(),
             });
         }
         Ok(out)

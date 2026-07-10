@@ -32,6 +32,8 @@ struct AppState {
     current_file: Mutex<Option<String>>,
     /// Repository access, CLI or pure-Rust per config/auto-detection
     backend: Mutex<Option<RepoBackend>>,
+    /// Filesystem watcher of the open repo; dropped on repo switch
+    watcher: Mutex<Option<notify::RecommendedWatcher>>,
 }
 
 #[derive(Serialize)]
@@ -40,6 +42,8 @@ struct RepoInfo {
     branch: String,
     /// Active backend name: "git" (CLI) or "gix" (built-in)
     backend: String,
+    /// Whether the filesystem watcher could be started
+    watching: bool,
 }
 
 #[derive(Serialize)]
@@ -92,6 +96,19 @@ struct CommitOut {
     hash: String,
     date: String,
     subject: String,
+    parents: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct EditorCandidate {
+    label: String,
+    command: String,
+}
+
+#[derive(Serialize)]
+struct EditorStatus {
+    configured: bool,
+    candidates: Vec<EditorCandidate>,
 }
 
 #[derive(Serialize)]
@@ -205,6 +222,75 @@ fn open_in_editor(path: String, state: State<AppState>) -> Result<String, String
         .map_err(|e| format!("エディタを起動できません ({program}): {e}"))
 }
 
+/// Editors worth probing for, in preference order
+fn detect_editors() -> Vec<EditorCandidate> {
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let known: [(&str, String); 6] = [
+        (
+            "Visual Studio Code",
+            format!("{local}\\Programs\\Microsoft VS Code\\Code.exe"),
+        ),
+        ("Cursor", format!("{local}\\Programs\\cursor\\Cursor.exe")),
+        (
+            "Notepad++",
+            "C:\\Program Files\\Notepad++\\notepad++.exe".to_string(),
+        ),
+        (
+            "Notepad++ (x86)",
+            "C:\\Program Files (x86)\\Notepad++\\notepad++.exe".to_string(),
+        ),
+        (
+            "Sublime Text",
+            "C:\\Program Files\\Sublime Text\\sublime_text.exe".to_string(),
+        ),
+        (
+            "VSCodium",
+            format!("{local}\\Programs\\VSCodium\\VSCodium.exe"),
+        ),
+    ];
+    let mut out: Vec<EditorCandidate> = known
+        .into_iter()
+        .filter(|(_, path)| std::path::Path::new(path).exists())
+        .map(|(label, path)| EditorCandidate {
+            label: label.to_string(),
+            command: format!("\"{path}\""),
+        })
+        .collect();
+    out.push(EditorCandidate {
+        label: "メモ帳 (notepad)".to_string(),
+        command: "notepad".to_string(),
+    });
+    out
+}
+
+#[tauri::command]
+fn editor_status(state: State<AppState>) -> EditorStatus {
+    let configured = state
+        .config
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| !c.editor.trim().is_empty())
+        .unwrap_or(false)
+        || !std::env::var("EDITOR")
+            .unwrap_or_default()
+            .trim()
+            .is_empty();
+    EditorStatus {
+        configured,
+        candidates: detect_editors(),
+    }
+}
+
+/// Persist the editor command to the shared config.yaml
+#[tauri::command]
+fn set_editor(command: String, state: State<AppState>) -> Result<(), String> {
+    let mut config_guard = state.config.lock().unwrap();
+    let config = config_guard.as_mut().ok_or("設定が読み込まれていません")?;
+    config.editor = command;
+    config.save().map_err(|e| e.to_string())
+}
+
 /// Split an editor command line, honoring double quotes so paths with
 /// spaces ("C:\Program Files\...") survive
 fn split_command(line: &str) -> Vec<String> {
@@ -291,13 +377,65 @@ fn load_commits(state: State<AppState>) -> Result<Vec<CommitOut>, String> {
                     hash: c.hash,
                     date: c.date,
                     subject: c.subject,
+                    parents: c.parents,
                 })
                 .collect()
         })
 }
 
+/// Watch the repo for changes and notify the frontend, coalescing
+/// event bursts (builds, checkouts) into one refresh per quiet period
+fn start_watcher(
+    app: tauri::AppHandle,
+    root: PathBuf,
+    state: &AppState,
+) -> Result<(), notify::Error> {
+    use notify::Watcher;
+    use tauri::Emitter;
+
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let mut watcher =
+        notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            let Ok(event) = res else { return };
+            let relevant = event.paths.iter().any(|p| {
+                let s = p.to_string_lossy().replace('\\', "/");
+                // the feedback transport has its own polling
+                if s.contains("/.tssdiff/") {
+                    return false;
+                }
+                // inside .git only ref movements matter (commit/checkout)
+                if let Some(idx) = s.find("/.git/") {
+                    let rest = &s[idx + 6..];
+                    return rest == "HEAD" || rest == "index" || rest.starts_with("refs/");
+                }
+                true
+            });
+            if relevant {
+                let _ = tx.send(());
+            }
+        })?;
+    watcher.watch(&root, notify::RecursiveMode::Recursive)?;
+    *state.watcher.lock().unwrap() = Some(watcher);
+
+    // exits when the watcher (and thus the sender) is dropped
+    std::thread::spawn(move || {
+        while rx.recv().is_ok() {
+            while rx
+                .recv_timeout(std::time::Duration::from_millis(400))
+                .is_ok()
+            {}
+            let _ = app.emit("repo-changed", ());
+        }
+    });
+    Ok(())
+}
+
 #[tauri::command]
-fn open_repo(path: String, state: State<AppState>) -> Result<RepoInfo, String> {
+fn open_repo(
+    path: String,
+    app: tauri::AppHandle,
+    state: State<AppState>,
+) -> Result<RepoInfo, String> {
     let dir = PathBuf::from(&path);
     std::env::set_current_dir(&dir).map_err(|e| format!("フォルダを開けません: {e}"))?;
 
@@ -317,10 +455,15 @@ fn open_repo(path: String, state: State<AppState>) -> Result<RepoInfo, String> {
     *state.current_file.lock().unwrap() = None;
     state.current_rows.lock().unwrap().clear();
 
+    // drop any previous watcher before watching the new root
+    *state.watcher.lock().unwrap() = None;
+    let watching = start_watcher(app, PathBuf::from(&root), &state).is_ok();
+
     Ok(RepoInfo {
         root,
         branch,
         backend: backend_name,
+        watching,
     })
 }
 
@@ -584,7 +727,9 @@ fn main() {
             poll_notes,
             copy_text,
             open_in_editor,
-            reveal_in_explorer
+            reveal_in_explorer,
+            editor_status,
+            set_editor
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

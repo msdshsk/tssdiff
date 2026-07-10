@@ -13,6 +13,8 @@ pub struct CommitInfo {
     pub hash: String,
     pub date: String,
     pub subject: String,
+    /// Abbreviated parent hashes, first parent first (empty for roots)
+    pub parents: Vec<String>,
 }
 
 /// One text row of `git log --graph` output; edge-only rows have no commit
@@ -333,9 +335,11 @@ impl GitExecutor {
         let output = Command::new("git")
             .args([
                 "log",
+                // children before parents, so graph edges never dangle
+                "--topo-order",
                 &format!("-n{limit}"),
                 "--date=format:%Y-%m-%d %H:%M",
-                "--pretty=format:%h%x09%ad%x09%s",
+                "--pretty=format:%h%x09%p%x09%ad%x09%s",
             ])
             .current_dir(dir)
             .output()
@@ -350,9 +354,16 @@ impl GitExecutor {
         Ok(stdout
             .lines()
             .filter_map(|line| {
-                let mut parts = line.splitn(3, '\t');
+                let mut parts = line.splitn(4, '\t');
+                let hash = parts.next()?.to_string();
+                let parents = parts
+                    .next()?
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
                 Some(CommitInfo {
-                    hash: parts.next()?.to_string(),
+                    hash,
+                    parents,
                     date: parts.next()?.to_string(),
                     subject: parts.next().unwrap_or("").to_string(),
                 })

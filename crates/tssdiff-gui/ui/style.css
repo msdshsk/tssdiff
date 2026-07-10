@@ -167,12 +167,14 @@ kbd {
 .commit-pane[hidden] { display: none; }
 .commit-list { overflow-y: auto; flex: 1; padding: 4px 0; }
 .citem {
-  padding: 4px 14px 4px 11px; cursor: pointer;
+  padding: 0 14px 0 8px; height: 40px; cursor: pointer;
   border-left: 3px solid transparent;
-  display: flex; flex-direction: column; gap: 1px;
+  display: flex; flex-direction: row; align-items: center; gap: 4px;
 }
 .citem:hover { background: var(--accent-softer); }
 .citem.active { background: var(--accent-soft); border-left-color: var(--accent); }
+.citem .cgraph { flex: none; display: block; height: 100%; }
+.citem .cbody { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; justify-content: center; }
 .citem .crow { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .citem .chash { font-family: var(--code); font-size: 11px; color: var(--accent); flex: none; }
 .citem .csubj {
@@ -325,6 +327,7 @@ kbd {
 .statusbar .seg { display: flex; align-items: center; gap: 6px; }
 .statusbar .keyhint { cursor: pointer; }
 .statusbar .keyhint:hover { color: var(--accent); }
+.watch-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--add); animation: pulse 2s ease-in-out infinite; }
 
 /* ---------- help overlay ---------- */
 .overlay {
@@ -360,6 +363,31 @@ kbd {
 .keycard tr:first-child td { border-top: none; }
 .keycard td.keys { width: 45%; white-space: nowrap; }
 .keycard td.keys .alt { color: var(--muted); font-size: 11px; margin-left: 5px; }
+
+/* ---------- editor picker ---------- */
+.sheet.narrow { max-width: 480px; }
+.sheet .sheet-note code {
+  font-family: var(--code); font-size: 11px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px;
+}
+.editor-choices { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 14px; }
+.editor-choice {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 9px 14px; cursor: pointer; font-family: var(--ui);
+}
+.editor-choice:hover { border-color: var(--accent); background: var(--accent-softer); }
+.editor-choice > span:first-child { font-size: 13px; font-weight: 600; color: var(--ink); }
+.editor-choice .cmd {
+  font-family: var(--code); font-size: 10.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ghost-btn {
+  background: none; border: 1px dashed var(--line); border-radius: 8px;
+  padding: 8px 14px; width: 100%; cursor: pointer;
+  font-family: var(--ui); font-size: 12.5px; color: var(--muted);
+}
+.ghost-btn:hover { border-color: var(--accent); color: var(--accent); }
 
 /* ---------- context menu ---------- */
 .ctxmenu {

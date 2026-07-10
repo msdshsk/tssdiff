@@ -71,6 +71,7 @@ async function tryOpen(path, silent) {
     $('sbBranchName').textContent = info.branch;
     $('sbBackend').hidden = false;
     $('sbBackend').textContent = info.backend === 'gix' ? 'via gix (built-in)' : 'via git';
+    $('sbWatch').hidden = !info.watching;
     const name = info.root.split(/[\\/]/).pop();
     appWindow.setTitle(name + ' — tssdiff');
     state.commits = [];
@@ -125,7 +126,9 @@ function showBinary(path) {
 }
 
 /* ---------- file list / tree ---------- */
-async function loadFiles() {
+/// soft: keep the current file, scroll position, folds, and selection
+/// (used by watch/F5 refreshes so external edits don't yank the view)
+async function loadFiles(soft) {
   try {
     state.files = await invoke('load_files', { mode: state.mode });
   } catch (e) {
@@ -147,6 +150,11 @@ async function loadFiles() {
     return;
   }
   const keep = state.files.find((f) => f.path === state.current);
+  if (keep && soft) {
+    await loadDiff(keep.path, true);
+    updateStatus();
+    return;
+  }
   selectFile(keep ? keep.path : state.files[0].path);
 }
 
@@ -228,7 +236,7 @@ async function selectFile(path) {
   updateStatus();
 }
 
-async function loadDiff(path) {
+async function loadDiff(path, keepScroll) {
   let out;
   try {
     out = await invoke('load_diff', { mode: state.mode, path, theme: syntectTheme() });
@@ -251,7 +259,7 @@ async function loadDiff(path) {
   $('fhPath').textContent = path;
   $('fhStat').innerHTML = f ? `<span class="a">+${f.added}</span> <span class="d">−${f.removed}</span>` : '';
   renderDiff();
-  $('diffScroll').scrollTop = 0;
+  if (!keepScroll) $('diffScroll').scrollTop = 0;
 }
 
 /* Display list: rows kept near changes, long context runs folded */
@@ -509,6 +517,10 @@ function openPopover() {
 function hidePopover() {
   $('popover').hidden = true;
   positionFloat();
+  if (pendingRefresh) {
+    pendingRefresh = false;
+    refreshAll();
+  }
 }
 
 function setKind(kind) {
@@ -628,15 +640,73 @@ async function copyText(text, what) {
 function openInEditor(path) {
   if (!path) return;
   invoke('open_in_editor', { path })
-    .then((program) =>
-      toast(
-        program === 'notepad'
-          ? 'notepad で開きました(config.yaml の editor で変更できます)'
-          : program + ' で開きました'
-      )
-    )
+    .then((program) => toast(program.split(/[\\/]/).pop() + ' で開きました'))
     .catch((e) => toast(String(e)));
 }
+
+/* ---------- editor picker: detect installed editors on first use ---------- */
+let pendingEditorPath = null;
+
+async function ensureEditorThen(path) {
+  try {
+    const status = await invoke('editor_status');
+    if (status.configured) {
+      openInEditor(path);
+      return;
+    }
+    pendingEditorPath = path;
+    showEditorPicker(status.candidates);
+  } catch (e) {
+    toast(String(e));
+  }
+}
+
+function showEditorPicker(candidates) {
+  const box = $('editorChoices');
+  box.innerHTML = '';
+  for (const c of candidates) {
+    const btn = document.createElement('button');
+    btn.className = 'editor-choice';
+    btn.innerHTML = `<span>${esc(c.label)}</span><span class="cmd">${esc(c.command)}</span>`;
+    btn.addEventListener('click', () => chooseEditor(c.command));
+    box.appendChild(btn);
+  }
+  $('editorOverlay').classList.add('open');
+}
+
+async function chooseEditor(command) {
+  try {
+    await invoke('set_editor', { command });
+    $('editorOverlay').classList.remove('open');
+    toast('エディタを設定しました');
+    if (pendingEditorPath) {
+      const path = pendingEditorPath;
+      pendingEditorPath = null;
+      openInEditor(path);
+    }
+  } catch (e) {
+    toast(String(e));
+  }
+}
+
+function closeEditorPicker() {
+  pendingEditorPath = null;
+  $('editorOverlay').classList.remove('open');
+}
+
+$('editorClose').addEventListener('click', closeEditorPicker);
+$('editorOverlay').addEventListener('click', (e) => {
+  if (e.target === $('editorOverlay')) closeEditorPicker();
+});
+$('editorBrowse').addEventListener('click', async () => {
+  const picked = await invoke('plugin:dialog|open', {
+    options: {
+      title: 'エディタの実行ファイルを選択',
+      filters: [{ name: '実行ファイル', extensions: ['exe', 'cmd', 'bat'] }],
+    },
+  });
+  if (picked) chooseEditor('"' + picked + '"');
+});
 
 function diffRowMenu(drow) {
   const idx = Number(drow.dataset.idx);
@@ -670,7 +740,7 @@ function diffRowMenu(drow) {
     action: () => copyText(`${state.current}:${lineNo}`, '位置'),
   });
   items.push('-');
-  items.push({ label: 'エディタで開く', action: () => openInEditor(state.current) });
+  items.push({ label: 'エディタで開く', action: () => ensureEditorThen(state.current) });
   if (range) items.push({ label: '選択を解除', kbd: 'Esc', action: clearSelection });
   return items;
 }
@@ -678,7 +748,7 @@ function diffRowMenu(drow) {
 function fileMenu(path) {
   return [
     { label: 'diff を表示', action: () => selectFile(path) },
-    { label: 'エディタで開く', action: () => openInEditor(path) },
+    { label: 'エディタで開く', action: () => ensureEditorThen(path) },
     '-',
     { label: '相対パスをコピー', action: () => copyText(path, 'パス') },
     {
@@ -716,6 +786,18 @@ function generalMenu() {
     },
     '-',
     { label: 'リポジトリを開く…', kbd: 'Ctrl+O', action: pickRepo },
+    {
+      label: 'エディタの設定…',
+      action: async () => {
+        pendingEditorPath = null;
+        try {
+          showEditorPicker((await invoke('editor_status')).candidates);
+        } catch (e) {
+          toast(String(e));
+        }
+      },
+      disabled: !state.repo,
+    },
     { label: 'ショートカット一覧', kbd: '?', action: openHelp },
   ];
 }
@@ -818,6 +900,89 @@ async function loadCommits() {
   renderCommits();
 }
 
+/* Lane assignment for the commit graph: each lane carries the hash it
+   expects next; commits claim their lane, merges close lanes, extra
+   parents fork new ones */
+const LANE_COLORS = ['#b98a2e', '#4e9a83', '#a86b9e', '#5f81b5', '#a08048', '#7d9a4e'];
+const LANE_STEP = 9;
+
+function laneX(i) {
+  return 5 + i * LANE_STEP;
+}
+
+function computeGraph(commits) {
+  const lanes = [];
+  const rows = [];
+  const seen = new Set();
+  let maxLanes = 1;
+  for (const c of commits) {
+    seen.add(c.hash);
+    const mine = [];
+    lanes.forEach((h, i) => {
+      if (h === c.hash) mine.push(i);
+    });
+    let col;
+    if (mine.length) col = mine[0];
+    else {
+      col = lanes.indexOf(null);
+      if (col < 0) {
+        col = lanes.length;
+        lanes.push(null);
+      }
+    }
+    const pre = lanes.slice();
+    const merged = mine.slice(1);
+    merged.forEach((i) => (lanes[i] = null));
+    // parents already drawn above (log order anomaly) get no edge
+    // rather than a line dangling to the bottom of the list
+    const parents = (c.parents || []).filter((p) => !seen.has(p));
+    lanes[col] = parents[0] || null;
+    const forks = [];
+    for (const p of parents.slice(1)) {
+      let t = lanes.findIndex((h, i) => h === p && i !== col);
+      if (t < 0) {
+        t = lanes.indexOf(null);
+        if (t < 0) {
+          t = lanes.length;
+          lanes.push(null);
+        }
+        lanes[t] = p;
+      }
+      forks.push(t);
+    }
+    rows.push({ col, mine, merged, forks, pre, post: lanes.slice() });
+    maxLanes = Math.max(maxLanes, lanes.length);
+    while (lanes.length && lanes[lanes.length - 1] === null) lanes.pop();
+  }
+  return { rows, maxLanes };
+}
+
+function svgGraph(r, width) {
+  const color = (i) => LANE_COLORS[i % LANE_COLORS.length];
+  const xc = laneX(r.col);
+  const parts = [];
+  r.pre.forEach((h, l) => {
+    if (h != null && !r.mine.includes(l)) {
+      parts.push(`<path d="M${laneX(l)} 0 V40" stroke="${color(l)}"/>`);
+    }
+  });
+  if (r.mine.length) parts.push(`<path d="M${xc} 0 V20" stroke="${color(r.col)}"/>`);
+  for (const m of r.merged) {
+    const xm = laneX(m);
+    parts.push(`<path d="M${xm} 0 C ${xm} 14, ${xc} 6, ${xc} 20" stroke="${color(m)}"/>`);
+  }
+  if (r.post[r.col] != null) parts.push(`<path d="M${xc} 20 V40" stroke="${color(r.col)}"/>`);
+  for (const t of r.forks) {
+    const xt = laneX(t);
+    parts.push(`<path d="M${xc} 20 C ${xc} 34, ${xt} 26, ${xt} 40" stroke="${color(t)}"/>`);
+  }
+  parts.push(`<circle cx="${xc}" cy="20" r="3.5" fill="${color(r.col)}" stroke="none"/>`);
+  return (
+    `<svg class="cgraph" width="${width}" height="40" viewBox="0 0 ${width} 40" ` +
+    `fill="none" stroke-width="1.6">${parts.join('')}</svg>`
+  );
+}
+
 function renderCommits() {
   const list = $('commitList');
   if (!state.historyMode) {
@@ -825,6 +990,8 @@ function renderCommits() {
     return;
   }
   const selected = state.mode.startsWith('commit:') ? state.mode.slice(7) : null;
+  const { rows, maxLanes } = computeGraph(state.commits);
+  const width = 8 + Math.min(maxLanes, 8) * LANE_STEP;
   const frag = document.createDocumentFragment();
 
   const wt = document.createElement('div');
@@ -832,21 +999,26 @@ function renderCommits() {
   wt.dataset.commit = '';
   wt.setAttribute('role', 'button');
   wt.tabIndex = 0;
-  wt.innerHTML = '<div class="crow"><span class="csubj">● Working tree</span></div>';
+  wt.innerHTML =
+    `<svg class="cgraph" width="${width}" height="40" viewBox="0 0 ${width} 40" fill="none" stroke-width="1.6">` +
+    `<circle cx="${laneX(0)}" cy="20" r="3.5" stroke="var(--add)"/>` +
+    `<path d="M${laneX(0)} 24 V40" stroke="var(--add)" stroke-dasharray="2 3"/></svg>` +
+    '<div class="cbody"><div class="crow"><span class="csubj">Working tree</span></div></div>';
   frag.appendChild(wt);
 
-  for (const c of state.commits) {
+  state.commits.forEach((c, i) => {
     const el = document.createElement('div');
     el.className = 'citem' + (selected === c.hash ? ' active' : '');
     el.dataset.commit = c.hash;
     el.setAttribute('role', 'button');
     el.tabIndex = 0;
     el.innerHTML =
-      `<div class="crow"><span class="chash">${esc(c.hash)}</span>` +
+      svgGraph(rows[i], width) +
+      `<div class="cbody"><div class="crow"><span class="chash">${esc(c.hash)}</span>` +
       `<span class="csubj">${esc(c.subject)}</span></div>` +
-      `<span class="cdate">${esc(c.date)}</span>`;
+      `<span class="cdate">${esc(c.date)}</span></div>`;
     frag.appendChild(el);
-  }
+  });
   list.innerHTML = '';
   list.appendChild(frag);
 }
@@ -882,8 +1054,20 @@ function updateStatus() {
 function refreshAll() {
   if (!state.repo) return;
   if (state.historyMode) loadCommits();
-  loadFiles();
+  loadFiles(true);
 }
+
+/* ---------- watch: auto-refresh on repository changes ---------- */
+let pendingRefresh = false;
+window.__TAURI__.event.listen('repo-changed', () => {
+  if (!state.repo) return;
+  // don't yank the view while the user is writing feedback
+  if (!$('popover').hidden) {
+    pendingRefresh = true;
+    return;
+  }
+  refreshAll();
+});
 
 function stepFile(delta) {
   if (!state.files.length) return;
@@ -972,6 +1156,7 @@ document.addEventListener('keydown', (e) => {
     overlay.classList.contains('open') ? closeHelp() : openHelp();
   } else if (e.key === 'Escape') {
     if (!ctxMenu.hidden) hideCtxMenu();
+    else if ($('editorOverlay').classList.contains('open')) closeEditorPicker();
     else if (overlay.classList.contains('open')) closeHelp();
     else if (!$('popover').hidden) hidePopover();
     else clearSelection();

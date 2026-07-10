@@ -2794,6 +2794,7 @@ mod tests {
             hash: "abc1234".to_string(),
             date: "2026-07-06 10:00".to_string(),
             subject: "test commit subject".to_string(),
+            parents: Vec::new(),
         }];
         app.graph_rows = vec![GraphRow {
             graph: "* ".to_string(),
