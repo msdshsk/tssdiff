@@ -80,6 +80,8 @@ struct NoteOut {
     /// Feedback id this note belongs to (own notes carry their payload
     /// id; agent replies reference the question they answer)
     reply_to: Option<String>,
+    /// Staged draft not yet flushed (renders as an un-sent placeholder)
+    pending: bool,
 }
 
 #[derive(Serialize)]
@@ -127,17 +129,21 @@ struct NotesOut {
     /// Session-wide counts for the status bar
     sent: usize,
     replies: usize,
+    /// Drafts staged but not yet flushed
+    pending: usize,
 }
 
 #[derive(Serialize)]
 struct SendOut {
-    /// Sink status line, e.g. "copied to clipboard"
+    /// Sink status line, e.g. "copied to clipboard" (empty for staging)
     status: String,
-    /// Payload id, used by the frontend to track awaited replies
+    /// Correlation id: the staged item's id (empty for flush/discard)
     id: String,
     notes: Vec<NoteOut>,
     sent: usize,
     replies: usize,
+    /// Drafts staged but not yet flushed
+    pending: usize,
 }
 
 fn mode_from(mode: &str) -> OperationMode {
@@ -733,6 +739,7 @@ fn map_notes(session: &AgentSession, file: &str, rows: &[AlignedRow]) -> Vec<Not
             old_line: n.old_line,
             new_line: n.new_line,
             reply_to: n.reply_to.clone(),
+            pending: n.pending,
         })
         .collect()
 }
@@ -745,13 +752,22 @@ fn anchored_notes(state: &State<AppState>, file: &str, rows: &[AlignedRow]) -> V
     }
 }
 
+/// (sent, replies): own flushed notes vs agent replies. Staged drafts
+/// count toward neither - they surface via `pending_count`.
 fn note_counts(session: &AgentSession) -> (usize, usize) {
-    let sent = session.notes.iter().filter(|n| n.author == "you").count();
-    (sent, session.notes.len() - sent)
+    let sent = session
+        .notes
+        .iter()
+        .filter(|n| n.author == "you" && !n.pending)
+        .count();
+    let replies = session.notes.iter().filter(|n| n.author != "you").count();
+    (sent, replies)
 }
 
+/// Stage a comment/question as an un-sent draft. It shows immediately as
+/// a pending note; nothing is transmitted until `flush_feedback`.
 #[tauri::command]
-fn send_feedback(
+fn stage_feedback(
     kind: String,
     comment: String,
     sel_start: usize,
@@ -768,12 +784,6 @@ fn send_feedback(
     if rows.is_empty() {
         return Err("diff が読み込まれていません".to_string());
     }
-    let config = state
-        .config
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("設定が読み込まれていません")?;
 
     let kind = if kind == "question" {
         FeedbackKind::Question
@@ -783,20 +793,76 @@ fn send_feedback(
 
     let mut session_guard = state.session.lock().unwrap();
     let session = session_guard.as_mut().ok_or("セッションがありません")?;
-    let payload = session.build_payload(kind, &file, &rows, sel_start, sel_end, &comment);
-    let status = session
-        .send(&config.agent, &payload)
-        .map_err(|e| e.to_string())?;
+    let id = session.stage(kind, &file, &rows, sel_start, sel_end, &comment);
 
     let notes = map_notes(session, &file, &rows);
     let (sent, replies) = note_counts(session);
 
     Ok(SendOut {
-        status,
-        id: payload.id,
+        status: "staged".to_string(),
+        id,
         notes,
         sent,
         replies,
+        pending: session.pending_count(),
+    })
+}
+
+/// Flush every staged draft as one batch through the configured sink.
+#[tauri::command]
+fn flush_feedback(state: State<AppState>) -> Result<SendOut, String> {
+    let config = state
+        .config
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("設定が読み込まれていません")?;
+    let file = state.current_file.lock().unwrap().clone();
+    let rows = state.current_rows.lock().unwrap().clone();
+
+    let mut session_guard = state.session.lock().unwrap();
+    let session = session_guard.as_mut().ok_or("セッションがありません")?;
+    let status = session.flush(&config.agent).map_err(|e| e.to_string())?;
+
+    let notes = match &file {
+        Some(file) => map_notes(session, file, &rows),
+        None => Vec::new(),
+    };
+    let (sent, replies) = note_counts(session);
+
+    Ok(SendOut {
+        status,
+        id: String::new(),
+        notes,
+        sent,
+        replies,
+        pending: session.pending_count(),
+    })
+}
+
+/// Discard all staged drafts (their inline echoes disappear).
+#[tauri::command]
+fn discard_feedback(state: State<AppState>) -> Result<SendOut, String> {
+    let file = state.current_file.lock().unwrap().clone();
+    let rows = state.current_rows.lock().unwrap().clone();
+
+    let mut session_guard = state.session.lock().unwrap();
+    let session = session_guard.as_mut().ok_or("セッションがありません")?;
+    let dropped = session.discard_pending();
+
+    let notes = match &file {
+        Some(file) => map_notes(session, file, &rows),
+        None => Vec::new(),
+    };
+    let (sent, replies) = note_counts(session);
+
+    Ok(SendOut {
+        status: format!("discarded {dropped}"),
+        id: String::new(),
+        notes,
+        sent,
+        replies,
+        pending: session.pending_count(),
     })
 }
 
@@ -808,10 +874,12 @@ fn poll_notes(state: State<AppState>) -> Result<NotesOut, String> {
             notes: Vec::new(),
             sent: 0,
             replies: 0,
+            pending: 0,
         });
     };
     session.poll_replies();
     let (sent, replies) = note_counts(session);
+    let pending = session.pending_count();
 
     let file = state.current_file.lock().unwrap().clone();
     let rows = state.current_rows.lock().unwrap();
@@ -824,6 +892,7 @@ fn poll_notes(state: State<AppState>) -> Result<NotesOut, String> {
         notes,
         sent,
         replies,
+        pending,
     })
 }
 
@@ -899,7 +968,9 @@ fn main() {
             load_files,
             load_commits,
             load_diff,
-            send_feedback,
+            stage_feedback,
+            flush_feedback,
+            discard_feedback,
             poll_notes,
             copy_text,
             open_in_editor,

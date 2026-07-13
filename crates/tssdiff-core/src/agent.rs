@@ -18,8 +18,8 @@ use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Schema version of the outbound payload
-const PAYLOAD_VERSION: u32 = 1;
+/// Schema version of the outbound batch envelope
+const PAYLOAD_VERSION: u32 = 2;
 /// Lines of unchanged context around the selected line in the excerpt
 const EXCERPT_CONTEXT: usize = 3;
 /// Hard cap on excerpt size so a huge hunk cannot flood the payload
@@ -57,21 +57,19 @@ impl FeedbackKind {
     }
 }
 
-/// Neutral outbound payload; sinks receive this as one JSON document.
-/// The schema is the public contract for command-sink adapters.
-#[derive(Debug, Serialize)]
-pub struct FeedbackPayload {
-    pub version: u32,
+/// One reviewed item inside a batch: a comment or question anchored to a
+/// line range of a single file. Adapters receive these as the `items`
+/// array of a `FeedbackBatch`.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedbackItem {
     pub id: String,
     pub kind: String,
-    /// Absolute repository root (or invocation directory outside a repo)
-    pub repo: String,
     /// Repository-relative path of the file under review
     pub file: String,
     pub old_line: Option<usize>,
     pub new_line: Option<usize>,
     /// Inclusive [start, end] line spans when a multi-line range was
-    /// selected (schema v1 additive; single lines have start == end)
+    /// selected (single-line selections have start == end)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_range: Option<[usize; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,10 +77,27 @@ pub struct FeedbackPayload {
     /// Unified-style excerpt of the change around the selected lines
     pub hunk_text: String,
     pub comment: String,
+}
+
+/// Neutral outbound envelope (schema v2): one or more reviewed items
+/// flushed together as a single JSON document. The schema is the public
+/// contract for command-sink adapters.
+#[derive(Debug, Serialize)]
+pub struct FeedbackBatch {
+    pub version: u32,
+    /// Absolute repository root (or invocation directory outside a repo)
+    pub repo: String,
     /// Absolute path agents should append reply JSON lines to
     pub reply_file: String,
-    /// Unix epoch seconds at send time
+    /// Unix epoch seconds at flush time
     pub timestamp: u64,
+    pub items: Vec<FeedbackItem>,
+}
+
+impl FeedbackBatch {
+    fn has_question(&self) -> bool {
+        self.items.iter().any(|item| item.kind == "question")
+    }
 }
 
 /// One inline note: either a reply read from the reply file, or the
@@ -99,6 +114,10 @@ pub struct Note {
     pub body: String,
     #[serde(default = "default_author")]
     pub author: String,
+    /// Local-only: a staged draft not yet flushed. Never (de)serialized -
+    /// replies read from the file are always already "sent".
+    #[serde(skip)]
+    pub pending: bool,
 }
 
 fn default_author() -> String {
@@ -129,6 +148,8 @@ pub struct AgentSession {
     next_id: u32,
     last_poll: Instant,
     pub notes: Vec<Note>,
+    /// Drafts staged locally, flushed together on the next `flush`
+    pub pending: Vec<FeedbackItem>,
 }
 
 impl AgentSession {
@@ -144,6 +165,7 @@ impl AgentSession {
             next_id: 1,
             last_poll: Instant::now(),
             notes: Vec::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -153,9 +175,9 @@ impl AgentSession {
         id
     }
 
-    /// Build the payload for the selected row range (inclusive row
+    /// Build a feedback item for the selected row range (inclusive row
     /// indices into `rows`; single-line selections have start == end)
-    pub fn build_payload(
+    fn build_item(
         &mut self,
         kind: FeedbackKind,
         file: &str,
@@ -163,7 +185,7 @@ impl AgentSession {
         selection_start: usize,
         selection_end: usize,
         comment: &str,
-    ) -> FeedbackPayload {
+    ) -> FeedbackItem {
         let selection_start = selection_start.min(rows.len().saturating_sub(1));
         let selection_end = selection_end.clamp(selection_start, rows.len().saturating_sub(1));
         let selected = &rows[selection_start..=selection_end];
@@ -179,11 +201,9 @@ impl AgentSession {
         let span =
             |lines: &[usize]| -> Option<[usize; 2]> { Some([*lines.first()?, *lines.last()?]) };
 
-        FeedbackPayload {
-            version: PAYLOAD_VERSION,
+        FeedbackItem {
             id: self.next_feedback_id(),
             kind: kind.as_str().to_string(),
-            repo: path_string(&self.repo),
             file: file.replace('\\', "/"),
             old_line: old_lines.first().copied(),
             new_line: new_lines.first().copied(),
@@ -191,46 +211,100 @@ impl AgentSession {
             new_range: span(&new_lines),
             hunk_text: excerpt(rows, selection_start, selection_end),
             comment: comment.to_string(),
-            reply_file: path_string(&self.reply_path),
-            timestamp: unix_now(),
         }
     }
 
-    /// Send through the configured sink. On success the user's own
-    /// feedback is stored as a note (the inline "sent" marker) and a
-    /// short status string is returned for the status bar.
-    pub fn send(&mut self, config: &AgentConfig, payload: &FeedbackPayload) -> Result<String> {
-        let status = match config.sink {
-            SinkKind::Clipboard => {
-                send_clipboard(&format_markdown(payload))?;
-                "copied to clipboard".to_string()
-            }
-            SinkKind::File => {
-                let path = self.prepare_outbox(config)?;
-                append_json_line(&path, payload)?;
-                format!("appended to {}", path.display())
-            }
-            SinkKind::Command => {
-                self.prepare_session_dir()?;
-                send_command(config, payload)?
+    /// Stage a comment/question as an un-sent draft. It shows immediately
+    /// as a pending inline note; nothing is transmitted until `flush`.
+    /// Returns the assigned correlation id.
+    pub fn stage(
+        &mut self,
+        kind: FeedbackKind,
+        file: &str,
+        rows: &[AlignedRow],
+        selection_start: usize,
+        selection_end: usize,
+        comment: &str,
+    ) -> String {
+        let item = self.build_item(kind, file, rows, selection_start, selection_end, comment);
+        let id = item.id.clone();
+        self.notes.push(Note {
+            reply_to: Some(item.id.clone()),
+            file: item.file.clone(),
+            old_line: item.old_line,
+            new_line: item.new_line,
+            body: item.comment.clone(),
+            author: "you".to_string(),
+            pending: true,
+        });
+        self.pending.push(item);
+        id
+    }
+
+    /// How many drafts are currently staged
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Discard every staged draft (and its inline echo note). Returns how
+    /// many were dropped.
+    pub fn discard_pending(&mut self) -> usize {
+        let dropped = self.pending.len();
+        self.pending.clear();
+        self.notes.retain(|note| !note.pending);
+        dropped
+    }
+
+    /// Flush every staged draft as ONE batch through the configured sink.
+    /// On success the drafts turn into sent inline notes and a short
+    /// status string is returned. On failure the drafts are kept so no
+    /// text is lost. Errors (rather than silently no-ops) when nothing is
+    /// staged.
+    pub fn flush(&mut self, config: &AgentConfig) -> Result<String> {
+        if self.pending.is_empty() {
+            return Err(anyhow!("No staged feedback to send"));
+        }
+        let batch = FeedbackBatch {
+            version: PAYLOAD_VERSION,
+            repo: path_string(&self.repo),
+            reply_file: path_string(&self.reply_path),
+            timestamp: unix_now(),
+            items: std::mem::take(&mut self.pending),
+        };
+
+        let result = match config.sink {
+            SinkKind::Clipboard => send_clipboard(&format_markdown_batch(&batch))
+                .map(|()| "copied to clipboard".to_string()),
+            SinkKind::File => self
+                .prepare_outbox(config)
+                .and_then(|path| append_json_line(&path, &batch).map(|()| path))
+                .map(|path| format!("appended to {}", path.display())),
+            SinkKind::Command => self
+                .prepare_session_dir()
+                .and_then(|_| send_command(config, &batch)),
+        };
+
+        let status = match result {
+            Ok(status) => status,
+            Err(e) => {
+                // Put the drafts back so the user can retry without retyping
+                self.pending = batch.items;
+                return Err(e);
             }
         };
 
         // Questions expect replies: reset the transport file so this
         // session only ever sees its own conversation
-        if payload.kind == "question" {
+        if batch.has_question() {
             self.reset_reply_file_once()?;
         }
 
-        self.notes.push(Note {
-            reply_to: Some(payload.id.clone()),
-            file: payload.file.clone(),
-            old_line: payload.old_line,
-            new_line: payload.new_line,
-            body: payload.comment.clone(),
-            author: "you".to_string(),
-        });
-        Ok(status)
+        let count = batch.items.len();
+        // The whole queue was flushed: every staged echo is now sent
+        for note in &mut self.notes {
+            note.pending = false;
+        }
+        Ok(format!("{count} item(s): {status}"))
     }
 
     /// Poll the reply file; returns true when new notes arrived
@@ -332,7 +406,7 @@ fn path_string(path: &Path) -> String {
     path.display().to_string().replace('\\', "/")
 }
 
-fn append_json_line(path: &Path, payload: &FeedbackPayload) -> Result<()> {
+fn append_json_line<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
@@ -342,7 +416,7 @@ fn append_json_line(path: &Path, payload: &FeedbackPayload) -> Result<()> {
         .append(true)
         .open(path)
         .with_context(|| format!("Failed to open {}", path.display()))?;
-    let json = serde_json::to_string(payload)?;
+    let json = serde_json::to_string(value)?;
     writeln!(file, "{json}")?;
     Ok(())
 }
@@ -359,7 +433,7 @@ fn send_clipboard(text: &str) -> Result<()> {
 /// Command sink contract: spawn the configured command, write the JSON
 /// payload to stdin, wait up to the timeout. Exit 0 means delivered;
 /// anything else surfaces stdout/stderr as the error message.
-fn send_command(config: &AgentConfig, payload: &FeedbackPayload) -> Result<String> {
+fn send_command(config: &AgentConfig, batch: &FeedbackBatch) -> Result<String> {
     use std::process::{Command, Stdio};
 
     let command_str = config.sink_command.trim();
@@ -390,7 +464,7 @@ fn send_command(config: &AgentConfig, payload: &FeedbackPayload) -> Result<Strin
         .map_err(|e| anyhow!("Failed to spawn {program}: {e}"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        let json = serde_json::to_string(payload)?;
+        let json = serde_json::to_string(batch)?;
         stdin
             .write_all(json.as_bytes())
             .map_err(|e| anyhow!("Failed to write payload to {program}: {e}"))?;
@@ -443,43 +517,67 @@ fn send_command(config: &AgentConfig, payload: &FeedbackPayload) -> Result<Strin
     }
 }
 
-/// Markdown rendering used when tssdiff itself is the bridge
-/// (clipboard sink): human-pasteable, with a machine-followable reply
-/// instruction for questions.
-pub fn format_markdown(payload: &FeedbackPayload) -> String {
-    let mut location = payload.file.clone();
-    if let Some(new_line) = payload.new_line {
+/// Location label for one item: `file:line`, or `file:line (old)` for a
+/// deleted line with no new-side anchor.
+fn item_location(item: &FeedbackItem) -> String {
+    let mut location = item.file.clone();
+    if let Some(new_line) = item.new_line {
         location.push_str(&format!(":{new_line}"));
-    } else if let Some(old_line) = payload.old_line {
+    } else if let Some(old_line) = item.old_line {
         location.push_str(&format!(":{old_line} (old)"));
     }
+    location
+}
 
-    let heading = match payload.kind.as_str() {
-        "question" => "Question about a diff",
-        _ => "Review comment on a diff",
-    };
-
+/// Markdown rendering used when tssdiff itself is the bridge (clipboard
+/// sink): human-pasteable, listing every item in the batch, with a
+/// single machine-followable reply instruction covering all questions.
+pub fn format_markdown_batch(batch: &FeedbackBatch) -> String {
+    let n = batch.items.len();
     let mut text = format!(
-        "## {heading}: {location}\n\nRepository: `{}`\n\n```diff\n{}\n```\n\n{}\n",
-        payload.repo,
-        payload.hunk_text.trim_end(),
-        payload.comment,
+        "# Diff review \u{2014} {n} item{}\n\nRepository: `{}`\n",
+        if n == 1 { "" } else { "s" },
+        batch.repo,
     );
 
-    if payload.kind == "question" {
-        let reply = serde_json::json!({
-            "reply_to": payload.id,
-            "file": payload.file,
-            "new_line": payload.new_line,
-            "old_line": payload.old_line,
-            "body": "<your answer>",
-            "author": "<your name>",
-        });
+    for (index, item) in batch.items.iter().enumerate() {
+        let location = item_location(item);
+        let kind_label = if item.kind == "question" {
+            "Question"
+        } else {
+            "Comment"
+        };
         text.push_str(&format!(
-            "\n---\nPlease answer by appending ONE line of JSON to `{}` \
-             (create the file if needed, keep it one line, do not edit other lines):\n{}\n",
-            payload.reply_file, reply
+            "\n## {}. {location} \u{b7} {kind_label}\n\n```diff\n{}\n```\n\n{}\n",
+            index + 1,
+            item.hunk_text.trim_end(),
+            item.comment,
         ));
+    }
+
+    let questions: Vec<&FeedbackItem> = batch
+        .items
+        .iter()
+        .filter(|item| item.kind == "question")
+        .collect();
+    if !questions.is_empty() {
+        text.push_str(&format!(
+            "\n---\nPlease answer the question(s) above by appending ONE line of JSON per \
+             answer to `{}` (create the file if needed, one line each, do not edit other \
+             lines):\n",
+            batch.reply_file
+        ));
+        for item in questions {
+            let reply = serde_json::json!({
+                "reply_to": item.id,
+                "file": item.file,
+                "new_line": item.new_line,
+                "old_line": item.old_line,
+                "body": "<your answer>",
+                "author": "<your name>",
+            });
+            text.push_str(&format!("{reply}\n"));
+        }
     }
     text
 }
@@ -613,39 +711,60 @@ mod tests {
     }
 
     #[test]
-    fn test_payload_schema_fields() {
+    fn test_item_fields_and_batch_schema() {
         let rows = align("a\nb\nc\n", "a\nB\nc\n");
         let temp = tempfile::tempdir().unwrap();
         let mut s = session(temp.path());
-        let payload = s.build_payload(FeedbackKind::Question, "src\\lib.rs", &rows, 1, 1, "why?");
+        s.stage(FeedbackKind::Question, "src\\lib.rs", &rows, 1, 1, "why?");
 
-        assert_eq!(payload.version, 1);
-        assert_eq!(payload.kind, "question");
-        assert_eq!(payload.file, "src/lib.rs");
-        assert_eq!(payload.old_line, Some(2));
-        assert_eq!(payload.new_line, Some(2));
-        assert_eq!(payload.old_range, Some([2, 2]));
-        assert_eq!(payload.new_range, Some([2, 2]));
-        assert!(payload.hunk_text.contains("- b"));
-        assert!(payload.hunk_text.contains("+ B"));
-        assert!(payload.reply_file.ends_with(".tssdiff/replies.jsonl"));
+        // Staging populates the draft queue and echoes a pending note
+        assert_eq!(s.pending.len(), 1);
+        let item = &s.pending[0];
+        assert_eq!(item.kind, "question");
+        assert_eq!(item.file, "src/lib.rs");
+        assert_eq!(item.old_line, Some(2));
+        assert_eq!(item.new_line, Some(2));
+        assert_eq!(item.old_range, Some([2, 2]));
+        assert_eq!(item.new_range, Some([2, 2]));
+        assert!(item.hunk_text.contains("- b"));
+        assert!(item.hunk_text.contains("+ B"));
+        assert_eq!(s.notes.len(), 1);
+        assert!(s.notes[0].pending);
 
-        let json = serde_json::to_string(&payload).unwrap();
+        // Flush to the file sink and inspect the v2 envelope
+        let config = AgentConfig {
+            sink: SinkKind::File,
+            ..Default::default()
+        };
+        s.flush(&config).unwrap();
+        let outbox = temp.path().join(".tssdiff").join("outbox.jsonl");
+        let content = std::fs::read_to_string(outbox).unwrap();
+        let batch: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(batch["version"], 2);
+        assert!(batch["repo"].is_string());
+        assert!(
+            batch["reply_file"]
+                .as_str()
+                .unwrap()
+                .ends_with(".tssdiff/replies.jsonl")
+        );
+        let items = batch["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
         for key in [
-            "version",
             "id",
             "kind",
-            "repo",
             "file",
             "old_line",
             "new_line",
             "hunk_text",
             "comment",
-            "reply_file",
-            "timestamp",
         ] {
-            assert!(json.contains(&format!("\"{key}\"")), "missing {key}");
+            assert!(items[0].get(key).is_some(), "missing {key}");
         }
+
+        // Flushed: queue cleared and the echo note is now sent
+        assert!(s.pending.is_empty());
+        assert!(!s.notes[0].pending);
     }
 
     #[test]
@@ -675,22 +794,23 @@ mod tests {
         let mut s = session(temp.path());
 
         // Select the whole changed block (rows 1..=2)
-        let payload = s.build_payload(FeedbackKind::Comment, "f.rs", &rows, 1, 2, "range");
-        assert_eq!(payload.old_line, Some(2));
-        assert_eq!(payload.new_line, Some(2));
-        assert_eq!(payload.old_range, Some([2, 2]));
-        assert_eq!(payload.new_range, Some([2, 3]));
+        s.stage(FeedbackKind::Comment, "f.rs", &rows, 1, 2, "range");
+        let item = &s.pending[0];
+        assert_eq!(item.old_line, Some(2));
+        assert_eq!(item.new_line, Some(2));
+        assert_eq!(item.old_range, Some([2, 2]));
+        assert_eq!(item.new_range, Some([2, 3]));
 
         // Every selected row is marked in the excerpt
-        let marked = payload
+        let marked = item
             .hunk_text
             .lines()
             .filter(|line| line.starts_with('>'))
             .count();
-        assert!(marked >= 3, "got:\n{}", payload.hunk_text);
-        assert!(payload.hunk_text.contains(">+ C"));
+        assert!(marked >= 3, "got:\n{}", item.hunk_text);
+        assert!(item.hunk_text.contains(">+ C"));
         // Context outside the selection is unmarked
-        assert!(payload.hunk_text.contains("   a"));
+        assert!(item.hunk_text.contains("   a"));
     }
 
     #[test]
@@ -722,6 +842,7 @@ mod tests {
             new_line: Some(2),
             body: "hi".into(),
             author: "agent".into(),
+            pending: false,
         };
         assert!(!note.anchors_to(&rows[0]));
         assert!(note.anchors_to(&rows[1]));
@@ -792,45 +913,98 @@ mod tests {
     }
 
     #[test]
-    fn test_file_sink_appends_payload() {
+    fn test_batch_flush_appends_all_items() {
         let temp = tempfile::tempdir().unwrap();
-        let rows = align("a\n", "b\n");
+        let rows = align("a\nb\nc\n", "A\nb\nC\n");
         let mut s = session(temp.path());
-        let payload = s.build_payload(FeedbackKind::Comment, "f.rs", &rows, 0, 0, "note");
+        s.stage(FeedbackKind::Comment, "f.rs", &rows, 0, 0, "first");
+        s.stage(FeedbackKind::Comment, "g.rs", &rows, 2, 2, "second");
+        assert_eq!(s.pending_count(), 2);
 
         let config = AgentConfig {
             sink: SinkKind::File,
             ..Default::default()
         };
-        let status = s.send(&config, &payload).unwrap();
-        assert!(status.contains("outbox.jsonl"));
+        let status = s.flush(&config).unwrap();
+        assert!(status.contains("2 item"), "got: {status}");
 
         let outbox = temp.path().join(".tssdiff").join("outbox.jsonl");
         let content = std::fs::read_to_string(outbox).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
-        assert_eq!(parsed["kind"], "comment");
-        assert_eq!(parsed["comment"], "note");
+        // One JSON line carries the whole batch
+        assert_eq!(content.trim().lines().count(), 1);
+        let batch: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        let items = batch["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["comment"], "first");
+        assert_eq!(items[1]["comment"], "second");
 
-        // Own feedback becomes an inline note ("sent" marker)
-        assert_eq!(s.notes.len(), 1);
-        assert_eq!(s.notes[0].author, "you");
+        // Both drafts became sent inline notes ("you"), queue emptied
+        assert_eq!(s.notes.len(), 2);
+        assert!(s.notes.iter().all(|n| !n.pending && n.author == "you"));
+        assert!(s.pending.is_empty());
     }
 
     #[test]
-    fn test_markdown_question_includes_reply_instruction() {
+    fn test_flush_empty_is_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut s = session(temp.path());
+        let config = AgentConfig {
+            sink: SinkKind::File,
+            ..Default::default()
+        };
+        assert!(s.flush(&config).is_err());
+    }
+
+    #[test]
+    fn test_flush_failure_keeps_drafts() {
         let temp = tempfile::tempdir().unwrap();
         let rows = align("a\n", "b\n");
         let mut s = session(temp.path());
-        let payload = s.build_payload(FeedbackKind::Question, "f.rs", &rows, 0, 0, "why?");
-        let text = format_markdown(&payload);
-        assert!(text.contains("## Question"));
+        s.stage(FeedbackKind::Comment, "f.rs", &rows, 0, 0, "note");
+        // Command sink with no configured command fails
+        let config = AgentConfig {
+            sink: SinkKind::Command,
+            ..Default::default()
+        };
+        assert!(s.flush(&config).is_err());
+        // Drafts preserved so nothing is lost on retry
+        assert_eq!(s.pending_count(), 1);
+        assert!(s.notes[0].pending);
+    }
+
+    #[test]
+    fn test_discard_pending_clears_drafts() {
+        let temp = tempfile::tempdir().unwrap();
+        let rows = align("a\n", "b\n");
+        let mut s = session(temp.path());
+        s.stage(FeedbackKind::Comment, "f.rs", &rows, 0, 0, "one");
+        s.stage(FeedbackKind::Question, "f.rs", &rows, 0, 0, "two");
+        assert_eq!(s.discard_pending(), 2);
+        assert!(s.pending.is_empty());
+        assert!(s.notes.is_empty());
+    }
+
+    #[test]
+    fn test_markdown_batch_includes_reply_instruction() {
+        let temp = tempfile::tempdir().unwrap();
+        let rows = align("a\n", "b\n");
+        let mut s = session(temp.path());
+        s.stage(FeedbackKind::Question, "f.rs", &rows, 0, 0, "why?");
+        s.stage(FeedbackKind::Comment, "f.rs", &rows, 0, 0, "nit");
+        let batch = FeedbackBatch {
+            version: PAYLOAD_VERSION,
+            repo: "repo".into(),
+            reply_file: "repo/.tssdiff/replies.jsonl".into(),
+            timestamp: 0,
+            items: s.pending.clone(),
+        };
+        let text = format_markdown_batch(&batch);
+        assert!(text.contains("2 items"));
+        assert!(text.contains("Question"));
+        assert!(text.contains("Comment"));
         assert!(text.contains("```diff"));
         assert!(text.contains("replies.jsonl"));
-        assert!(text.contains("reply_to"));
-
-        let comment = s.build_payload(FeedbackKind::Comment, "f.rs", &rows, 0, 0, "nit");
-        let text = format_markdown(&comment);
-        assert!(text.contains("## Review comment"));
-        assert!(!text.contains("replies.jsonl"));
+        // Only the question yields a reply line
+        assert_eq!(text.matches("reply_to").count(), 1);
     }
 }

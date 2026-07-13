@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Agent feedback: stage multiple comments/questions as drafts and send
+  them together as one batch instead of one message per remark. TUI:
+  `Enter` stages a draft (cursor stays), `S` sends all, `X` discards;
+  drafts show as dimmed `✎` notes with a `N pending` status indicator.
+  GUI: the popover's **ドラフトに追加** button stages, a status-bar
+  segment with **送信** / **破棄** flushes or clears the queue.
+- GUI: the file/history tree pane is now resizable - drag the divider
+  between it and the diff pane (double-click resets), width persisted.
+  Tree items and commit rows gained hover tooltips showing the full
+  path / commit message.
+
+### Changed
+- Outbound feedback payload is now a v2 batch envelope
+  `{version:2, repo, reply_file, timestamp, items:[...]}`. The
+  `tssdiff-kuroko-bridge` adapter accepts both v1 and v2 (v2 renders to
+  one markdown, one POST). See docs/agent-feedback.md.
+
 ## [0.1.0] - 2024-07-01
 
 ### Added

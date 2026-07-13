@@ -30,6 +30,7 @@ const state = {
   sel: { start: null, end: null },
   notes: [],           // NoteOut list for the current file
   awaiting: new Set(), // question ids still waiting for a reply
+  stagedQuestions: new Set(), // staged (un-sent) question ids
   lastReplies: 0,
   wrap: localStorage.getItem('tssdiff.wrap') === '1',
   maxCh: 0,            // widest code line of the current diff, in ch
@@ -192,6 +193,7 @@ function renderTree() {
           el.className = 'titem dir';
           el.style.paddingLeft = 14 + d * 14 + 'px';
           el.dataset.dir = dirPath;
+          el.title = dirPath;
           el.innerHTML = `<span class="fname">${state.collapsedDirs.has(dirPath) ? '▸' : '▾'} ${esc(parts[d])}/</span>`;
           frag.appendChild(el);
         }
@@ -204,6 +206,7 @@ function renderTree() {
     el.className = 'titem' + (f.path === state.current ? ' active' : '');
     el.style.paddingLeft = 14 + depth * 14 + 'px';
     el.dataset.file = f.path;
+    el.title = f.path;
     el.setAttribute('role', 'button');
     el.tabIndex = 0;
     el.innerHTML =
@@ -420,10 +423,10 @@ function noteBlock(notes) {
   wrap.className = 'note-block';
   for (const n of notes) {
     const entry = document.createElement('div');
-    entry.className = 'note-entry';
+    entry.className = 'note-entry' + (n.pending ? ' draft' : '');
     const who =
       n.author === 'you'
-        ? '<span class="you">あなた</span>'
+        ? `<span class="you">あなた</span>${n.pending ? '<span class="draft-tag">下書き</span>' : ''}`
         : `<span class="agent-dot"></span>${esc(n.author)}`;
     const line =
       n.new_line != null ? `新 ${n.new_line} 行` : n.old_line != null ? `旧 ${n.old_line} 行` : '';
@@ -434,7 +437,10 @@ function noteBlock(notes) {
       (long ? '<button class="note-more">すべて表示</button>' : '');
     wrap.appendChild(entry);
   }
-  const awaiting = notes.some((n) => n.author === 'you' && state.awaiting.has(n.reply_to));
+  // Un-sent drafts never show the "awaiting reply" pulse
+  const awaiting = notes.some(
+    (n) => n.author === 'you' && !n.pending && state.awaiting.has(n.reply_to)
+  );
   if (awaiting) {
     const p = document.createElement('div');
     p.className = 'note-pending';
@@ -641,7 +647,17 @@ function toggleKind() {
   setKind(popKind === 'comment' ? 'question' : 'comment');
 }
 
-async function sendFeedback() {
+function applyFeedbackOut(out) {
+  state.notes = out.notes;
+  state.lastReplies = out.replies;
+  updateNotesBadge(out.sent, out.replies);
+  updatePendingUI(out.pending);
+  renderDiff();
+}
+
+/// Stage the typed comment/question as an un-sent draft. Nothing is
+/// transmitted until "送信" (flushFeedback) fires the whole batch.
+async function stageFeedback() {
   const text = $('popText').value.trim();
   if (!text) {
     $('popText').focus();
@@ -651,25 +667,56 @@ async function sendFeedback() {
   if (!range) return;
   $('popSend').disabled = true;
   try {
-    const out = await invoke('send_feedback', {
+    const out = await invoke('stage_feedback', {
       kind: popKind,
       comment: text,
       selStart: range[0],
       selEnd: range[1],
     });
-    if (popKind === 'question') state.awaiting.add(out.id);
-    state.notes = out.notes;
-    state.lastReplies = out.replies;
-    updateNotesBadge(out.sent, out.replies);
+    if (popKind === 'question' && out.id) state.stagedQuestions.add(out.id);
+    applyFeedbackOut(out);
     hidePopover();
     clearSelection();
-    renderDiff();
-    toast('送信しました: ' + out.status);
+    toast(`ドラフトに追加（未送信 ${out.pending} 件）`);
   } catch (e) {
     toast(String(e));
   } finally {
     $('popSend').disabled = false;
   }
+}
+
+/// Flush every staged draft as one batch through the configured sink.
+async function flushFeedback() {
+  try {
+    const out = await invoke('flush_feedback');
+    // Staged questions are now actually sent: start awaiting their replies
+    for (const id of state.stagedQuestions) state.awaiting.add(id);
+    state.stagedQuestions.clear();
+    applyFeedbackOut(out);
+    toast('送信しました: ' + out.status);
+  } catch (e) {
+    toast(String(e));
+  }
+}
+
+/// Discard all staged drafts.
+async function discardFeedback() {
+  try {
+    const out = await invoke('discard_feedback');
+    state.stagedQuestions.clear();
+    applyFeedbackOut(out);
+    toast('ドラフトを破棄しました');
+  } catch (e) {
+    toast(String(e));
+  }
+}
+
+/// Toggle the status-bar "N drafts pending" segment with send/discard.
+function updatePendingUI(pending) {
+  const seg = $('pendingSeg');
+  if (!seg) return;
+  seg.hidden = !pending;
+  if (pending) $('pendingLabel').textContent = `${pending} 件のドラフト（未送信）`;
 }
 
 let threadCursor = -1;
@@ -684,7 +731,9 @@ function jumpNextThread() {
 }
 
 $('floatComment').addEventListener('click', openPopover);
-$('popSend').addEventListener('click', sendFeedback);
+$('popSend').addEventListener('click', stageFeedback);
+$('btnFlush').addEventListener('click', flushFeedback);
+$('btnDiscard').addEventListener('click', discardFeedback);
 $('kindSeg').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-kind]');
   if (b) setKind(b.dataset.kind);
@@ -692,7 +741,7 @@ $('kindSeg').addEventListener('click', (e) => {
 $('popText').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.ctrlKey) {
     e.preventDefault();
-    sendFeedback();
+    stageFeedback();
   } else if (e.key === 'Tab') {
     e.preventDefault();
     toggleKind();
@@ -1033,6 +1082,7 @@ setInterval(async () => {
   try {
     const out = await invoke('poll_notes');
     updateNotesBadge(out.sent, out.replies);
+    updatePendingUI(out.pending);
     if (out.replies > state.lastReplies) {
       state.lastReplies = out.replies;
       state.notes = out.notes;
@@ -1206,6 +1256,7 @@ function renderCommits() {
     const el = document.createElement('div');
     el.className = 'citem' + (selected === c.hash ? ' active' : '');
     el.dataset.commit = c.hash;
+    el.title = `${c.hash}  ${c.subject}\n${c.date}`;
     el.setAttribute('role', 'button');
     el.tabIndex = 0;
     el.innerHTML =
@@ -1305,8 +1356,9 @@ const KEYS = [
   { title: 'エージェントフィードバック', rows: [
     ['行番号クリック + Shift+クリック', '', '行範囲を選択', false],
     ['C', 'c', '選択範囲にコメントを書く', false],
-    ['Ctrl+Enter', '', 'エージェントに送信(入力中)', false],
+    ['Ctrl+Enter', '', 'ドラフトに追加(入力中)', false],
     ['Tab', '', 'コメント ⇄ 質問の種別切替(入力中)', false],
+    ['ステータスバー「送信」', '', '溜めたドラフトを一括送信', false],
     ['R', '', '次の注釈スレッドへ', false],
   ]},
   { title: 'モード / アプリ', rows: [
@@ -1402,6 +1454,54 @@ document.addEventListener('keydown', (e) => {
     jumpNextThread();
   }
 });
+
+/* ---------- resizable tree pane ---------- */
+(function initTreeResize() {
+  const root = document.documentElement;
+  const split = $('vSplit');
+  const treePane = $('treePane');
+  const clamp = (w) => Math.max(180, Math.min(w, Math.round(window.innerWidth * 0.52)));
+  const setWidth = (w) => root.style.setProperty('--tree-w', clamp(w) + 'px');
+
+  const saved = parseInt(localStorage.getItem('tssdiff.treeWidth') || '', 10);
+  if (saved) setWidth(saved);
+
+  let dragging = false;
+  const onMove = (e) => {
+    if (!dragging) return;
+    setWidth(e.clientX - treePane.getBoundingClientRect().left);
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    split.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+    const w = parseInt(getComputedStyle(treePane).width, 10);
+    if (w) localStorage.setItem('tssdiff.treeWidth', String(w));
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+  };
+  split.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    split.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    e.preventDefault();
+  });
+  // Double-click restores the default width
+  split.addEventListener('dblclick', () => {
+    root.style.removeProperty('--tree-w');
+    localStorage.removeItem('tssdiff.treeWidth');
+  });
+  // Re-clamp when the window shrinks so the tree never eats the diff pane
+  window.addEventListener('resize', () => {
+    const cur = parseInt(getComputedStyle(treePane).width, 10);
+    if (cur) setWidth(cur);
+  });
+})();
 
 /* ---------- boot ---------- */
 (async function init() {

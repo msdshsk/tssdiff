@@ -736,7 +736,9 @@ impl App {
             .notes
             .iter()
             .map(|note| {
-                let prefix = icon_width + 1 + note.author.width() + 2;
+                // Pending drafts carry an extra " (draft)" suffix on the label
+                let draft_extra = if note.pending { " (draft)".width() } else { 0 };
+                let prefix = icon_width + 1 + note.author.width() + 2 + draft_extra;
                 let mut wrapped = agent::wrap_body(
                     &note.body,
                     base.saturating_sub(prefix),
@@ -887,9 +889,10 @@ impl App {
         }
     }
 
-    /// Send the typed comment/question for the cursor row through the
-    /// configured sink
-    fn send_comment(&mut self) {
+    /// Stage the typed comment/question for the selected rows as an
+    /// un-sent draft. The line cursor stays active so more drafts can be
+    /// added across lines (and files) before flushing them all with `S`.
+    fn stage_comment(&mut self) {
         let text = self.comment_text.trim().to_string();
         if text.is_empty() {
             self.warning_message = Some("Comment is empty".to_string());
@@ -921,29 +924,52 @@ impl App {
             return;
         };
 
-        let payload = self.agent_session.build_payload(
-            self.comment_kind,
-            &file,
-            &rows,
-            first_row,
-            last_row,
-            &text,
-        );
-        let result = self.agent_session.send(&self.config.agent, &payload);
+        let kind = self.comment_kind;
+        self.agent_session
+            .stage(kind, &file, &rows, first_row, last_row, &text);
         self.aligned_rows = Some(rows);
 
-        match result {
+        let pending = self.agent_session.pending_count();
+        self.warning_message = Some(format!(
+            "{} staged ({pending} pending - S: send all, X: discard)",
+            kind.label()
+        ));
+        // Close the input box but keep the line cursor for the next draft;
+        // lift any range anchor so the next selection starts clean
+        self.comment_input_mode = false;
+        self.comment_text.clear();
+        self.comment_anchor = None;
+        self.refresh_note_display();
+    }
+
+    /// Flush every staged draft as one batch through the configured sink.
+    fn flush_feedback(&mut self) {
+        if self.agent_session.pending_count() == 0 {
+            self.warning_message = Some("No staged feedback to send".to_string());
+            return;
+        }
+        match self.agent_session.flush(&self.config.agent) {
             Ok(status) => {
-                self.warning_message =
-                    Some(format!("{} sent ({status})", self.comment_kind.label()));
+                self.warning_message = Some(format!("Sent - {status}"));
                 self.exit_comment_mode();
                 self.refresh_note_display();
             }
             Err(e) => {
-                // Keep the input open so the text is not lost
+                // Drafts are kept on failure so the text is not lost
                 self.warning_message = Some(format!("Send failed: {e}"));
             }
         }
+    }
+
+    /// Discard all staged drafts (their inline echoes disappear).
+    fn discard_pending_feedback(&mut self) {
+        let dropped = self.agent_session.discard_pending();
+        if dropped == 0 {
+            self.warning_message = Some("No staged feedback".to_string());
+        } else {
+            self.warning_message = Some(format!("Discarded {dropped} draft(s)"));
+        }
+        self.refresh_note_display();
     }
 
     /// Switch the file list between flat full-path and directory tree,
@@ -2214,7 +2240,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                     // Comment input box captures all typing while open
                     if app.comment_input_mode {
                         match key.code {
-                            KeyCode::Enter => app.send_comment(),
+                            KeyCode::Enter => app.stage_comment(),
                             KeyCode::Esc => {
                                 app.comment_input_mode = false;
                                 app.comment_text.clear();
@@ -2248,6 +2274,9 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: Ap
                             KeyCode::Enter | KeyCode::Char('c') => {
                                 app.comment_input_mode = true;
                             }
+                            // Flush all staged drafts as one batch; discard them
+                            KeyCode::Char('S') => app.flush_feedback(),
+                            KeyCode::Char('X') => app.discard_pending_feedback(),
                             _ => {}
                         }
                         continue;
@@ -2933,7 +2962,7 @@ mod tests {
     }
 
     #[test]
-    fn test_comment_mode_send_via_file_sink() {
+    fn test_comment_mode_stage_and_flush_via_file_sink() {
         let temp = tempfile::tempdir().unwrap();
         let mut app = app_with_rows(temp.path());
         app.config.agent.sink = config::SinkKind::File;
@@ -2949,29 +2978,46 @@ mod tests {
         app.comment_cursor = Some(1); // the changed row
         app.comment_text = "why this change?".to_string();
         app.comment_kind = FeedbackKind::Question;
-        app.send_comment();
+        app.stage_comment();
 
-        // Payload written through the file sink
+        // Staged, not yet sent: input box closed but the line cursor stays
+        // active, nothing written to the outbox, draft shown as a note
+        assert!(!app.comment_input_mode);
+        assert!(app.comment_cursor.is_some());
+        assert_eq!(app.agent_session.pending_count(), 1);
         let outbox = temp.path().join(".tssdiff").join("outbox.jsonl");
-        let content = std::fs::read_to_string(outbox).unwrap();
-        let payload: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
-        assert_eq!(payload["kind"], "question");
-        assert_eq!(payload["file"], "test.rs");
-        assert_eq!(payload["new_line"], 2);
-        assert!(payload["hunk_text"].as_str().unwrap().contains("+ new"));
+        assert!(!outbox.exists());
+        assert!(
+            app.display_rows
+                .iter()
+                .any(|entry| matches!(entry, side_by_side::DisplayRow::Note { .. }))
+        );
+
+        app.flush_feedback();
+
+        // Batch written through the file sink (v2 envelope)
+        let content = std::fs::read_to_string(&outbox).unwrap();
+        let batch: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(batch["version"], 2);
+        let item = &batch["items"][0];
+        assert_eq!(item["kind"], "question");
+        assert_eq!(item["file"], "test.rs");
+        assert_eq!(item["new_line"], 2);
+        assert!(item["hunk_text"].as_str().unwrap().contains("+ new"));
 
         // Question resets the reply transport for this session
         assert!(temp.path().join(".tssdiff").join("replies.jsonl").exists());
 
-        // Comment mode closed, own note spliced beneath the row
+        // Comment mode closed after flush, own note spliced beneath the row
         assert!(app.comment_cursor.is_none());
         assert!(!app.comment_input_mode);
+        assert_eq!(app.agent_session.pending_count(), 0);
         assert!(
             app.display_rows
                 .iter()
                 .any(|entry| matches!(entry, side_by_side::DisplayRow::Note { note: 0, line: 0 }))
         );
-        assert!(app.warning_message.as_deref().unwrap().contains("sent"));
+        assert!(app.warning_message.as_deref().unwrap().contains("Sent"));
     }
 
     #[test]
@@ -2987,15 +3033,17 @@ mod tests {
         assert_eq!(app.comment_selection(), Some((0, 2)));
 
         app.comment_text = "whole block".to_string();
-        app.send_comment();
+        app.stage_comment();
+        app.flush_feedback();
 
         let outbox = temp.path().join(".tssdiff").join("outbox.jsonl");
         let content = std::fs::read_to_string(outbox).unwrap();
-        let payload: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
-        assert_eq!(payload["new_line"], 1);
-        assert_eq!(payload["new_range"][0], 1);
-        assert_eq!(payload["new_range"][1], 3);
-        assert_eq!(payload["old_range"][1], 3);
+        let batch: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        let item = &batch["items"][0];
+        assert_eq!(item["new_line"], 1);
+        assert_eq!(item["new_range"][0], 1);
+        assert_eq!(item["new_range"][1], 3);
+        assert_eq!(item["old_range"][1], 3);
         assert!(app.comment_anchor.is_none());
     }
 
@@ -3013,6 +3061,7 @@ mod tests {
             new_line: Some(2),
             body: "This renames the variable.".to_string(),
             author: "agent".to_string(),
+            pending: false,
         });
         app.refresh_note_display();
 
@@ -3070,6 +3119,7 @@ mod tests {
             new_line: Some(2),
             body,
             author: "agent".to_string(),
+            pending: false,
         });
         app.refresh_note_display();
 

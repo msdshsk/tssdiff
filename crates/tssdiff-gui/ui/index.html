@@ -65,6 +65,8 @@
     <div class="tree-list" id="treeList"></div>
   </aside>
 
+  <div class="vsplit" id="vSplit" title="ドラッグでツリー幅を調整（ダブルクリックで既定に戻す）" role="separator" aria-orientation="vertical"></div>
+
   <main class="diffpane" id="diffPane">
     <div class="file-head" id="fileHead" hidden>
       <span class="path" id="fhPath"></span>
@@ -85,8 +87,8 @@
         </div>
         <textarea id="popText" placeholder="エージェントへの伝言。選択範囲の diff が excerpt として自動添付されます"></textarea>
         <div class="pop-foot">
-          <span class="hint"><kbd>Ctrl+Enter</kbd> 送信 · <kbd>Tab</kbd> 種別切替 · <kbd>Esc</kbd> 取消</span>
-          <button class="send-btn" id="popSend">エージェントに送信</button>
+          <span class="hint"><kbd>Ctrl+Enter</kbd> ドラフトに追加 · <kbd>Tab</kbd> 種別切替 · <kbd>Esc</kbd> 取消</span>
+          <button class="send-btn" id="popSend">ドラフトに追加</button>
         </div>
       </div>
       <div class="empty-state" id="emptyState">
@@ -110,6 +112,12 @@
   <span class="seg" id="sbWatch" hidden title="ファイル変更を監視して自動更新します"><span class="watch-dot"></span>watching</span>
   <span class="seg" id="sbFile"></span>
   <div class="spacer"></div>
+  <span class="seg pending-seg" id="pendingSeg" hidden>
+    <span class="draft-dot"></span>
+    <span id="pendingLabel"></span>
+    <button class="mini-btn" id="btnFlush" title="ドラフトを1つのバッチで一括送信">送信</button>
+    <button class="mini-btn ghost" id="btnDiscard" title="ドラフトをすべて破棄">破棄</button>
+  </span>
   <span class="seg" id="sbNotes" hidden></span>
   <span class="seg keyhint" id="btnHelp"><kbd>?</kbd> ショートカット</span>
 </div>

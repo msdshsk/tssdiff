@@ -320,8 +320,17 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         entry("C", "commit staged changes"),
         entry("o", "open file in editor"),
         entry("r", "reload diffs"),
-        entry("c", "comment / question to agent (v: range)"),
+        entry("c", "enter comment mode (line cursor)"),
         entry("n", "expand / collapse long agent notes"),
+        Line::default(),
+        section(" Agent feedback (in c mode)"),
+        entry("c / Enter", "open input on the line / range"),
+        entry("v", "drop a range anchor, then move"),
+        entry("Tab", "toggle Comment / Question"),
+        entry("Enter", "stage draft (cursor stays for more)"),
+        entry("S", "send all staged drafts as one batch"),
+        entry("X", "discard staged drafts"),
+        entry("Esc / q", "leave comment mode"),
         Line::default(),
         section(" Mouse"),
         entry("click", "select entry / menu, click again: open"),
@@ -728,6 +737,22 @@ pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
         vec![Span::raw(" No item selected")]
     };
 
+    // Surface staged-but-unsent drafts so they are never silently forgotten
+    let mut status_spans = status_spans;
+    let pending = app.agent_session.pending_count();
+    if pending > 0 {
+        let icon = match app.config.icon_mode {
+            tssdiff_core::config::IconMode::Ascii => "~",
+            _ => "✎",
+        };
+        status_spans.push(Span::styled(
+            format!("  {icon} {pending} pending (S: send, X: discard)"),
+            Style::default()
+                .fg(app.theme.colors.status_modified.0.rat())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     let status = Paragraph::new(Line::from(status_spans))
         .block(
             Block::default()
@@ -1013,14 +1038,25 @@ fn note_line(note_index: usize, body_line: usize, gutter_width: usize, app: &App
         .unwrap_or_default();
 
     let is_own = note.author == "you";
-    let author_color = if is_own {
+    // Staged-but-unsent drafts render dim with a pencil marker so they read
+    // as "not yet sent" next to the confirmed sent/reply notes
+    let author_color = if note.pending {
+        app.theme.colors.text_dim.0.rat()
+    } else if is_own {
         app.theme.colors.status_modified.0.rat()
     } else {
         app.theme.colors.status_added.0.rat()
     };
-    let icon = match app.config.icon_mode {
-        tssdiff_core::config::IconMode::Ascii => "*",
-        _ => "💬",
+    let icon = if note.pending {
+        match app.config.icon_mode {
+            tssdiff_core::config::IconMode::Ascii => "~",
+            _ => "✎",
+        }
+    } else {
+        match app.config.icon_mode {
+            tssdiff_core::config::IconMode::Ascii => "*",
+            _ => "💬",
+        }
     };
 
     let mut spans = vec![Span::styled(
@@ -1028,8 +1064,13 @@ fn note_line(note_index: usize, body_line: usize, gutter_width: usize, app: &App
         Style::default().fg(app.theme.colors.text_dim.0.rat()),
     )];
     if body_line == 0 {
+        let label = if note.pending {
+            format!("{icon} {} (draft): ", note.author)
+        } else {
+            format!("{icon} {}: ", note.author)
+        };
         spans.push(Span::styled(
-            format!("{icon} {}: ", note.author),
+            label,
             Style::default()
                 .fg(author_color)
                 .add_modifier(Modifier::BOLD),
@@ -1059,7 +1100,7 @@ pub fn render_comment_input(f: &mut Frame, area: Rect, app: &App) {
         _ => "▏",
     };
     let title = format!(
-        " Send to agent [{}] (Enter: send, Tab: kind, Esc: back)",
+        " Send to agent [{}] (Enter: stage, Tab: kind, Esc: back)",
         app.comment_kind.label()
     );
     f.render_widget(Clear, popup);
